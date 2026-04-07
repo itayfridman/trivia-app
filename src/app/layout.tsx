@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "טריוויה יומית",
-  description: "שאלה אחת ביום, תשובה חכמה ביום.",
-  applicationName: "טריוויה יומית",
+  title: "Daily Trivia",
+  description: "One question at a time. 100 levels of challenge.",
+  applicationName: "Daily Trivia",
   manifest: "/manifest.json",
 };
 
@@ -14,7 +14,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="he" dir="rtl">
+    <html lang="en" dir="ltr">
       <body>{children}</body>
     </html>
   );

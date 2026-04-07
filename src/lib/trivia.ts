@@ -11,7 +11,7 @@ export type TriviaQuestion = {
 
 export const allQuestions = questions as TriviaQuestion[];
 
-export const TOTAL_LEVELS = 100;
+export const TOTAL_LEVELS = allQuestions.length;
 
 export const getQuestionForLevel = (level: number): TriviaQuestion => {
   const safeLevel = Math.min(TOTAL_LEVELS, Math.max(1, Math.floor(level)));
