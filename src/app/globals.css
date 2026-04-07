@@ -36,3 +36,18 @@ body {
 .card {
   @apply rounded-2xl border border-white/10 bg-white/5 p-4 shadow-lg backdrop-blur-sm;
 }
+
+.animate-fade-in {
+  animation: fadeIn 220ms ease-out;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

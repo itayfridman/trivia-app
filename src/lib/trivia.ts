@@ -16,42 +16,39 @@ export const QUESTIONS_PER_SECTION = 10;
 export const TOTAL_SECTIONS = 10;
 
 export const SECTION_CATEGORIES = [
+  "General Knowledge",
+  "Science",
+  "History",
+  "Geography",
   "Sports",
   "Music",
-  "History",
-  "Science",
-  "Geography",
-  "Entertainment",
+  "Movies & TV",
   "Technology",
-  "Art",
-  "World",
+  "Art & Literature",
+  "World Culture",
 ] as const;
 
-const shuffle = <T>(items: T[]): T[] => {
-  const copy = [...items];
-  for (let i = copy.length - 1; i > 0; i -= 1) {
-    const randomIndex = Math.floor(Math.random() * (i + 1));
-    [copy[i], copy[randomIndex]] = [copy[randomIndex], copy[i]];
-  }
-  return copy;
+export type TriviaSection = {
+  id: number;
+  title: string;
+  questions: TriviaQuestion[];
 };
 
-export const createSessionQuestions = (): TriviaQuestion[] => {
-  const shuffledBase = shuffle(allQuestions);
+export const getSections = (): TriviaSection[] => {
   const needed = TOTAL_SECTIONS * QUESTIONS_PER_SECTION;
-  const sliced = shuffledBase.slice(0, needed);
+  const sliced = allQuestions.slice(0, needed);
 
-  return sliced.map((question, index) => {
-    const categoryIndex = Math.floor(index / QUESTIONS_PER_SECTION);
-    return {
+  return Array.from({ length: TOTAL_SECTIONS }, (_, index) => {
+    const start = index * QUESTIONS_PER_SECTION;
+    const end = start + QUESTIONS_PER_SECTION;
+    const sectionQuestions = sliced.slice(start, end).map((question) => ({
       ...question,
-      category: SECTION_CATEGORIES[categoryIndex],
+      category: SECTION_CATEGORIES[index],
+    }));
+    return {
+      id: index + 1,
+      title: SECTION_CATEGORIES[index],
+      questions: sectionQuestions,
     };
   });
-};
-
-export const getQuestionForLevel = (level: number, sessionQuestions: TriviaQuestion[]): TriviaQuestion => {
-  const safeLevel = Math.min(TOTAL_LEVELS, Math.max(1, Math.floor(level)));
-  const index = (safeLevel - 1) % sessionQuestions.length;
-  return sessionQuestions[index];
 };
