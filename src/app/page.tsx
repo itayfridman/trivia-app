@@ -10,7 +10,14 @@ import {
   type LeaderboardEntry,
   type StoredProgress,
 } from "@/lib/storage";
-import { createSessionQuestions, getQuestionForLevel, TOTAL_LEVELS, type TriviaQuestion } from "@/lib/trivia";
+import {
+  createSessionQuestions,
+  getQuestionForLevel,
+  QUESTIONS_PER_SECTION,
+  TOTAL_LEVELS,
+  TOTAL_SECTIONS,
+  type TriviaQuestion,
+} from "@/lib/trivia";
 
 type Theme = "dark" | "light";
 
@@ -25,6 +32,9 @@ export default function Home() {
   const [attemptCount, setAttemptCount] = useState(0);
   const [lastPointsAwarded, setLastPointsAwarded] = useState(0);
   const [hasSavedCurrentRun, setHasSavedCurrentRun] = useState(false);
+  const [lastSavedCheckpointLevel, setLastSavedCheckpointLevel] = useState(0);
+  const [playerNameInput, setPlayerNameInput] = useState("");
+  const [nameError, setNameError] = useState("");
   const [theme, setTheme] = useState<Theme>("dark");
   const [isMuted, setIsMuted] = useState(false);
   const [musicReady, setMusicReady] = useState(false);
@@ -36,6 +46,7 @@ export default function Home() {
     return getQuestionForLevel(currentLevel, sessionQuestions);
   }, [currentLevel, sessionQuestions]);
   const isLevelComplete = feedback === "correct";
+  const currentSection = Math.floor((currentLevel - 1) / QUESTIONS_PER_SECTION) + 1;
 
   useEffect(() => {
     const savedTheme = window.localStorage.getItem("trivia-theme") as Theme | null;
@@ -46,6 +57,8 @@ export default function Home() {
 
     const loaded = loadProgress();
     setProgress(loaded);
+    setPlayerNameInput(loaded.playerName);
+    setLastSavedCheckpointLevel(Math.floor((loaded.currentLevel - 1) / QUESTIONS_PER_SECTION) * QUESTIONS_PER_SECTION);
     setSessionQuestions(createSessionQuestions());
     setLeaderboard(loadLeaderboard());
     setIsLoaded(true);
@@ -75,10 +88,19 @@ export default function Home() {
 
   useEffect(() => {
     if (feedback === "correct" && currentLevel === TOTAL_LEVELS && !hasSavedCurrentRun) {
-      setLeaderboard(saveScoreToLeaderboard(progress.totalScore, progress.currentLevel));
+      setLeaderboard(saveScoreToLeaderboard(progress.playerName, progress.totalScore, progress.currentLevel));
       setHasSavedCurrentRun(true);
     }
-  }, [currentLevel, feedback, hasSavedCurrentRun, progress.currentLevel, progress.totalScore]);
+  }, [currentLevel, feedback, hasSavedCurrentRun, progress.currentLevel, progress.playerName, progress.totalScore]);
+
+  useEffect(() => {
+    const reachedCheckpoint = feedback === "correct" && currentLevel % QUESTIONS_PER_SECTION === 0;
+    if (!reachedCheckpoint || currentLevel === lastSavedCheckpointLevel) {
+      return;
+    }
+    setLeaderboard(saveScoreToLeaderboard(progress.playerName, progress.totalScore, currentLevel));
+    setLastSavedCheckpointLevel(currentLevel);
+  }, [currentLevel, feedback, lastSavedCheckpointLevel, progress.playerName, progress.totalScore]);
 
   const submitAnswer = (index: number) => {
     if (!isLoaded || isLevelComplete || !question) {
@@ -124,8 +146,8 @@ export default function Home() {
 
   const restart = () => {
     if (!isLoaded) return;
-    if (progress.totalScore > 0) {
-      setLeaderboard(saveScoreToLeaderboard(progress.totalScore, progress.currentLevel));
+    if (progress.currentLevel > 1 || progress.totalScore > 0) {
+      setLeaderboard(saveScoreToLeaderboard(progress.playerName, progress.totalScore, progress.currentLevel));
     }
     const nextProgress: StoredProgress = { ...progress, currentLevel: 1, totalScore: 0 };
     setProgress(nextProgress);
@@ -136,6 +158,20 @@ export default function Home() {
     setAttemptCount(0);
     setLastPointsAwarded(0);
     setHasSavedCurrentRun(false);
+    setLastSavedCheckpointLevel(0);
+  };
+
+  const savePlayerName = () => {
+    const cleanedName = playerNameInput.trim().slice(0, 24);
+    if (!cleanedName) {
+      setNameError("Please enter your name or nickname to start.");
+      return;
+    }
+    const nextProgress: StoredProgress = { ...progress, playerName: cleanedName };
+    setProgress(nextProgress);
+    saveProgress(nextProgress);
+    setPlayerNameInput(cleanedName);
+    setNameError("");
   };
 
   const toggleTheme = () => {
@@ -179,7 +215,7 @@ export default function Home() {
             </button>
           </div>
           <p className="text-sm text-slate-600 dark:text-slate-300">
-            100 levels. One question per level. Answer correctly to move forward.
+            10 categories, 10 questions each. Answer correctly to move forward.
           </p>
           <div className="mt-3 flex gap-2">
             <button
@@ -200,12 +236,14 @@ export default function Home() {
           <section className="card bg-white dark:bg-white/5">
             <h3 className="mb-2 text-lg font-semibold">Top 10 scores</h3>
             {leaderboard.length === 0 ? (
-              <p className="text-sm text-slate-600 dark:text-slate-300">No scores yet. Finish a run and hit Restart to save your score.</p>
+              <p className="text-sm text-slate-600 dark:text-slate-300">
+                No scores yet. Complete at least one category to appear here.
+              </p>
             ) : (
               <ol className="space-y-2">
                 {leaderboard.map((entry, index) => (
                   <li key={`${entry.playedAt}-${entry.score}-${index}`} className="rounded-xl bg-slate-50 p-3 text-sm dark:bg-black/20">
-                    #{index + 1} - {entry.score} pts (level {entry.reachedLevel}/100)
+                    #{index + 1} - {entry.playerName}: {entry.score} pts (level {entry.reachedLevel}/100)
                   </li>
                 ))}
               </ol>
@@ -213,10 +251,30 @@ export default function Home() {
           </section>
         )}
 
+        {!progress.playerName ? (
+          <section className="card bg-white dark:bg-white/5">
+            <h2 className="mb-2 text-xl font-semibold">Enter your name to start</h2>
+            <p className="mb-3 text-sm text-slate-600 dark:text-slate-300">
+              Your name will appear on the leaderboard.
+            </p>
+            <input
+              value={playerNameInput}
+              onChange={(event) => setPlayerNameInput(event.target.value)}
+              maxLength={24}
+              placeholder="Name or nickname"
+              className="mb-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-slate-900 outline-none ring-indigo-300 focus:ring-2 dark:border-white/20 dark:bg-black/20 dark:text-white"
+            />
+            {nameError && <p className="mb-2 text-sm font-semibold text-rose-500">{nameError}</p>}
+            <button onClick={savePlayerName} className="w-full rounded-xl bg-indigo-600 px-4 py-3 font-semibold text-white">
+              Start quiz
+            </button>
+          </section>
+        ) : (
+
         <section className="card bg-white dark:bg-white/5">
           <div className="mb-3">
             <div className="flex items-center justify-between text-sm">
-              <div className="font-semibold">Level {currentLevel}</div>
+              <div className="font-semibold">Category {currentSection}/{TOTAL_SECTIONS}</div>
               <div className="text-slate-600 dark:text-slate-300">
                 Level {currentLevel}/{TOTAL_LEVELS}
               </div>
@@ -311,6 +369,7 @@ export default function Home() {
             </div>
           )}
         </section>
+        )}
 
         <section className="card bg-white dark:bg-white/5">
           <div className="text-sm text-slate-600 dark:text-slate-300">Progress is saved on this device (localStorage).</div>
@@ -324,6 +383,7 @@ export default function Home() {
               <div className="text-2xl font-bold">{Math.max(0, TOTAL_LEVELS - currentLevel)}</div>
             </div>
           </div>
+          <div className="mt-3 text-xs text-slate-500 dark:text-slate-400">Player: {progress.playerName || "Not set yet"}</div>
         </section>
       </div>
     </main>

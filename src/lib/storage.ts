@@ -1,9 +1,11 @@
 export type StoredProgress = {
   currentLevel: number; // 1..100
   totalScore: number;
+  playerName: string;
 };
 
 export type LeaderboardEntry = {
+  playerName: string;
   score: number;
   reachedLevel: number;
   playedAt: string;
@@ -17,6 +19,7 @@ const MAX_LEVEL = 100;
 export const defaultProgress: StoredProgress = {
   currentLevel: MIN_LEVEL,
   totalScore: 0,
+  playerName: "",
 };
 
 export const loadProgress = (): StoredProgress => {
@@ -29,7 +32,7 @@ export const loadProgress = (): StoredProgress => {
     if (!raw) {
       return defaultProgress;
     }
-    const parsed = JSON.parse(raw) as StoredProgress;
+    const parsed = JSON.parse(raw) as Partial<StoredProgress>;
     const safeLevel =
       typeof parsed.currentLevel === "number" && Number.isFinite(parsed.currentLevel)
         ? Math.min(MAX_LEVEL, Math.max(MIN_LEVEL, Math.floor(parsed.currentLevel)))
@@ -38,11 +41,13 @@ export const loadProgress = (): StoredProgress => {
       typeof parsed.totalScore === "number" && Number.isFinite(parsed.totalScore)
         ? Math.max(0, Math.floor(parsed.totalScore))
         : defaultProgress.totalScore;
+    const safePlayerName = typeof parsed.playerName === "string" ? parsed.playerName.trim().slice(0, 24) : "";
     return {
       ...defaultProgress,
       ...parsed,
       currentLevel: safeLevel,
       totalScore: safeScore,
+      playerName: safePlayerName,
     };
   } catch {
     return defaultProgress;
@@ -64,7 +69,7 @@ export const loadLeaderboard = (): LeaderboardEntry[] => {
       return [];
     }
 
-    const parsed = JSON.parse(raw) as LeaderboardEntry[];
+    const parsed = JSON.parse(raw) as Partial<LeaderboardEntry>[];
     if (!Array.isArray(parsed)) {
       return [];
     }
@@ -72,6 +77,8 @@ export const loadLeaderboard = (): LeaderboardEntry[] => {
     return parsed
       .filter(
         (entry) =>
+          typeof entry?.playerName === "string" &&
+          entry.playerName.trim().length > 0 &&
           typeof entry?.score === "number" &&
           Number.isFinite(entry.score) &&
           typeof entry?.reachedLevel === "number" &&
@@ -79,9 +86,10 @@ export const loadLeaderboard = (): LeaderboardEntry[] => {
           typeof entry?.playedAt === "string",
       )
       .map((entry) => ({
-        score: Math.max(0, Math.floor(entry.score)),
-        reachedLevel: Math.min(MAX_LEVEL, Math.max(MIN_LEVEL, Math.floor(entry.reachedLevel))),
-        playedAt: entry.playedAt,
+        playerName: (entry.playerName as string).trim().slice(0, 24),
+        score: Math.max(0, Math.floor(entry.score as number)),
+        reachedLevel: Math.min(MAX_LEVEL, Math.max(MIN_LEVEL, Math.floor(entry.reachedLevel as number))),
+        playedAt: entry.playedAt as string,
       }))
       .sort((a, b) => b.score - a.score)
       .slice(0, 10);
@@ -90,8 +98,14 @@ export const loadLeaderboard = (): LeaderboardEntry[] => {
   }
 };
 
-export const saveScoreToLeaderboard = (score: number, reachedLevel: number): LeaderboardEntry[] => {
+export const saveScoreToLeaderboard = (playerName: string, score: number, reachedLevel: number): LeaderboardEntry[] => {
+  const safePlayerName = playerName.trim().slice(0, 24);
+  if (!safePlayerName) {
+    return loadLeaderboard();
+  }
+
   const safeEntry: LeaderboardEntry = {
+    playerName: safePlayerName,
     score: Math.max(0, Math.floor(score)),
     reachedLevel: Math.min(MAX_LEVEL, Math.max(MIN_LEVEL, Math.floor(reachedLevel))),
     playedAt: new Date().toISOString(),

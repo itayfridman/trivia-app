@@ -12,31 +12,20 @@ export type TriviaQuestion = {
 export const allQuestions = questions as TriviaQuestion[];
 
 export const TOTAL_LEVELS = allQuestions.length;
+export const QUESTIONS_PER_SECTION = 10;
+export const TOTAL_SECTIONS = 10;
 
-export const REQUIRED_CATEGORIES = [
+export const SECTION_CATEGORIES = [
   "Sports",
   "Music",
-  "Movies",
-  "TV Shows",
   "History",
   "Science",
   "Geography",
-  "Food",
+  "Entertainment",
   "Technology",
   "Art",
-  "Politics",
-  "Animals",
-  "Video Games",
-  "Fashion",
-  "Space",
-  "Literature",
-  "Celebrities",
-  "Cars",
-  "Holidays",
-  "Mythology",
+  "World",
 ] as const;
-
-const QUESTIONS_PER_CATEGORY = 5;
 
 const shuffle = <T>(items: T[]): T[] => {
   const copy = [...items];
@@ -49,14 +38,14 @@ const shuffle = <T>(items: T[]): T[] => {
 
 export const createSessionQuestions = (): TriviaQuestion[] => {
   const shuffledBase = shuffle(allQuestions);
-  const needed = REQUIRED_CATEGORIES.length * QUESTIONS_PER_CATEGORY;
+  const needed = TOTAL_SECTIONS * QUESTIONS_PER_SECTION;
   const sliced = shuffledBase.slice(0, needed);
 
   return sliced.map((question, index) => {
-    const categoryIndex = Math.floor(index / QUESTIONS_PER_CATEGORY);
+    const categoryIndex = Math.floor(index / QUESTIONS_PER_SECTION);
     return {
       ...question,
-      category: REQUIRED_CATEGORIES[categoryIndex],
+      category: SECTION_CATEGORIES[categoryIndex],
     };
   });
 };
