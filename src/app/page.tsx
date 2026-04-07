@@ -2,21 +2,22 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { defaultPlayer, loadPlayer, savePlayer, type LeaderboardEntry, type StoredPlayer } from "@/lib/storage";
-import { QUESTIONS_PER_SECTION, getSections, type TriviaSection } from "@/lib/trivia";
+import { LEVELS_PER_CATEGORY, QUESTIONS_PER_LEVEL, buildCategoryRun, getCategories, type TriviaCategory } from "@/lib/trivia";
 
 type Theme = "dark" | "light";
 type Screen = "entry" | "menu" | "quiz" | "summary";
 type Feedback = "correct" | "wrong" | null;
 
 export default function Home() {
-  const sections = useMemo(() => getSections(), []);
+  const categories = useMemo(() => getCategories(), []);
   const [player, setPlayer] = useState<StoredPlayer>(defaultPlayer);
   const [screen, setScreen] = useState<Screen>("entry");
-  const [activeSection, setActiveSection] = useState<TriviaSection | null>(null);
+  const [activeCategory, setActiveCategory] = useState<TriviaCategory | null>(null);
+  const [runQuestions, setRunQuestions] = useState<ReturnType<typeof buildCategoryRun>>([]);
   const [questionIndex, setQuestionIndex] = useState(0);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [feedback, setFeedback] = useState<Feedback>(null);
-  const [sectionScore, setSectionScore] = useState(0);
+  const [totalScore, setTotalScore] = useState(0);
   const [correctAnswers, setCorrectAnswers] = useState(0);
   const [incorrectAnswers, setIncorrectAnswers] = useState(0);
   const [timeLeft, setTimeLeft] = useState(20);
@@ -30,10 +31,16 @@ export default function Home() {
   const [theme, setTheme] = useState<Theme>("dark");
   const [isMuted, setIsMuted] = useState(false);
   const [musicReady, setMusicReady] = useState(false);
-  const audioRef = useRef<HTMLAudioElement>(null);
+  const musicRef = useRef<HTMLAudioElement>(null);
+  const correctRef = useRef<HTMLAudioElement>(null);
+  const wrongRef = useRef<HTMLAudioElement>(null);
 
-  const currentQuestion = activeSection?.questions[questionIndex] ?? null;
+  const currentQuestion = runQuestions[questionIndex] ?? null;
   const hasAnswered = feedback !== null;
+  const levelNumber = Math.floor(questionIndex / QUESTIONS_PER_LEVEL) + 1;
+  const questionInLevel = (questionIndex % QUESTIONS_PER_LEVEL) + 1;
+  const isEndOfLevel = questionInLevel === QUESTIONS_PER_LEVEL;
+  const isFinalQuestion = questionIndex === LEVELS_PER_CATEGORY * QUESTIONS_PER_LEVEL - 1;
 
   useEffect(() => {
     const savedTheme = window.localStorage.getItem("trivia-theme") as Theme | null;
@@ -50,7 +57,7 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    const audioElement = audioRef.current;
+    const audioElement = musicRef.current;
     if (!audioElement) return;
 
     audioElement.volume = 0.25;
@@ -61,13 +68,13 @@ export default function Home() {
   }, []);
 
   const toggleMute = () => {
-    const audioElement = audioRef.current;
-    if (!audioElement) return;
     const nextMuted = !isMuted;
-    audioElement.muted = nextMuted;
     setIsMuted(nextMuted);
+    if (musicRef.current) musicRef.current.muted = nextMuted;
+    if (correctRef.current) correctRef.current.muted = nextMuted;
+    if (wrongRef.current) wrongRef.current.muted = nextMuted;
     if (!nextMuted) {
-      audioElement.play().catch(() => undefined);
+      musicRef.current?.play().catch(() => undefined);
     }
   };
 
@@ -88,19 +95,12 @@ export default function Home() {
     return () => window.clearInterval(timer);
   }, [screen, currentQuestion, hasAnswered]);
 
-  const playTone = (kind: "good" | "bad") => {
-    const AudioContextClass = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!AudioContextClass || isMuted) return;
-    const context = new AudioContextClass();
-    const oscillator = context.createOscillator();
-    const gain = context.createGain();
-    oscillator.type = "sine";
-    oscillator.frequency.value = kind === "good" ? 740 : 210;
-    gain.gain.value = 0.05;
-    oscillator.connect(gain);
-    gain.connect(context.destination);
-    oscillator.start();
-    oscillator.stop(context.currentTime + 0.15);
+  const playEffect = (kind: "good" | "bad") => {
+    if (isMuted) return;
+    const target = kind === "good" ? correctRef.current : wrongRef.current;
+    if (!target) return;
+    target.currentTime = 0;
+    target.play().catch(() => undefined);
   };
 
   const loadLeaderboard = async () => {
@@ -125,21 +125,21 @@ export default function Home() {
     setSelectedIndex(index >= 0 ? index : null);
     setFeedback(isCorrect ? "correct" : "wrong");
     if (isCorrect) {
-      setSectionScore((prev) => prev + 10);
+      setTotalScore((prev) => prev + 10);
       setCorrectAnswers((prev) => prev + 1);
-      playTone("good");
+      playEffect("good");
       return;
     }
     setIncorrectAnswers((prev) => prev + 1);
     if (timedOut) {
       setLeaderboardError("Time is up for this question.");
     }
-    playTone("bad");
+    playEffect("bad");
   };
 
   const goNextQuestion = async () => {
-    if (!activeSection || !hasAnswered) return;
-    if (questionIndex + 1 < QUESTIONS_PER_SECTION) {
+    if (!activeCategory || !hasAnswered) return;
+    if (questionIndex + 1 < LEVELS_PER_CATEGORY * QUESTIONS_PER_LEVEL) {
       setQuestionIndex((prev) => prev + 1);
       setSelectedIndex(null);
       setFeedback(null);
@@ -154,9 +154,9 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           playerName: player.playerName,
-          score: sectionScore,
-          sectionId: activeSection.id,
-          sectionTitle: activeSection.title,
+          score: totalScore,
+          sectionId: activeCategory.id,
+          sectionTitle: activeCategory.title,
           correctAnswers,
           incorrectAnswers,
         }),
@@ -176,12 +176,21 @@ export default function Home() {
     }
   };
 
-  const startSection = (section: TriviaSection) => {
-    setActiveSection(section);
+  useEffect(() => {
+    if (!hasAnswered || !isEndOfLevel || isFinalQuestion) return;
+    const timeout = window.setTimeout(() => {
+      void goNextQuestion();
+    }, 900);
+    return () => window.clearTimeout(timeout);
+  }, [hasAnswered, isEndOfLevel, isFinalQuestion]);
+
+  const startCategory = (category: TriviaCategory) => {
+    setActiveCategory(category);
+    setRunQuestions(buildCategoryRun(category));
     setQuestionIndex(0);
     setSelectedIndex(null);
     setFeedback(null);
-    setSectionScore(0);
+    setTotalScore(0);
     setCorrectAnswers(0);
     setIncorrectAnswers(0);
     setTimeLeft(20);
@@ -189,9 +198,9 @@ export default function Home() {
     setLeaderboardError("");
   };
 
-  const replaySection = () => {
-    if (!activeSection) return;
-    startSection(activeSection);
+  const replayCategory = () => {
+    if (!activeCategory) return;
+    startCategory(activeCategory);
   };
 
   const savePlayerName = () => {
@@ -219,12 +228,14 @@ export default function Home() {
   return (
     <main className="animated-gradient min-h-screen text-slate-900 transition-all duration-300 dark:text-slate-100">
       <audio
-        ref={audioRef}
+        ref={musicRef}
         src="https://cdn.pixabay.com/download/audio/2022/03/15/audio_c8c8a73467.mp3?filename=lofi-study-112191.mp3"
         loop
       />
+      <audio ref={correctRef} src="https://www.soundjay.com/trumpet/sounds/trumpet-fanfare-1.mp3" />
+      <audio ref={wrongRef} src="https://www.soundjay.com/misc/sounds/fail-buzzer-01.mp3" />
       <button onClick={toggleMute} className="fixed right-4 top-4 z-20 rounded-full bg-black/40 px-3 py-2 text-xs text-white">
-        {isMuted ? "Unmute" : "Mute"} music
+        {isMuted ? "Unmute" : "Mute"}
       </button>
       <div className="mx-auto flex min-h-screen w-full max-w-lg flex-col gap-4 px-4 py-6">
         <header className="card bg-white dark:bg-white/5">
@@ -238,7 +249,7 @@ export default function Home() {
             </button>
           </div>
           <p className="text-sm text-slate-600 dark:text-slate-300">
-            10 categories, 10 questions each. Answer correctly to move forward.
+            10 categories, 10 levels per category, 10 questions per level.
           </p>
           <div className="mt-3 flex gap-2">
             <button
@@ -260,7 +271,7 @@ export default function Home() {
             <h3 className="mb-2 text-lg font-semibold">Top 10 scores</h3>
             {leaderboard.length === 0 ? (
               <p className="text-sm text-slate-600 dark:text-slate-300">
-                No scores yet. Complete at least one category to appear here.
+                No scores yet. Complete at least one category run to appear here.
               </p>
             ) : (
               <ol className="space-y-2">
@@ -301,26 +312,26 @@ export default function Home() {
               <span className="text-sm text-slate-600 dark:text-slate-300">{player.playerName}</span>
             </div>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-2">
-              {sections.map((section) => (
+              {categories.map((category) => (
                 <button
-                  key={section.id}
-                  onClick={() => startSection(section)}
+                  key={category.id}
+                  onClick={() => startCategory(category)}
                   className="rounded-xl border border-slate-300 bg-slate-50 px-3 py-4 text-left transition hover:-translate-y-0.5 hover:bg-slate-100 dark:border-white/15 dark:bg-white/5 dark:hover:bg-white/10"
                 >
-                  <div className="text-xs text-indigo-500">Section {section.id}</div>
-                  <div className="font-semibold">{section.title}</div>
-                  <div className="text-xs text-slate-500 dark:text-slate-400">10 questions</div>
+                  <div className="text-xs text-indigo-500">Category {category.id}</div>
+                  <div className="font-semibold">{category.title}</div>
+                  <div className="text-xs text-slate-500 dark:text-slate-400">10 levels x 10 questions</div>
                 </button>
               ))}
             </div>
           </section>
         ) : null}
 
-        {screen === "quiz" && currentQuestion && activeSection ? (
+        {screen === "quiz" && currentQuestion && activeCategory ? (
           <section className="card bg-white dark:bg-white/5 animate-fade-in">
             <div className="mb-3 flex items-center justify-between text-sm">
               <div className="font-semibold">
-                Question {questionIndex + 1}/{QUESTIONS_PER_SECTION}
+                Level {levelNumber}/{LEVELS_PER_CATEGORY} — Question {questionInLevel}/{QUESTIONS_PER_LEVEL}
               </div>
               <div className="rounded-full bg-slate-100 px-2 py-1 text-xs dark:bg-white/10">Time: {timeLeft}s</div>
             </div>
@@ -328,13 +339,22 @@ export default function Home() {
             <div className="mb-4 rounded-xl bg-slate-50 p-3 text-sm dark:bg-black/20">
               <div className="flex items-center justify-between">
                 <span>Category</span>
-                <span className="font-semibold">{activeSection.title}</span>
+                <span className="font-semibold">{activeCategory.title}</span>
               </div>
               <div className="mt-2 flex items-center justify-between">
                 <span>Current score</span>
-                <span className="text-lg font-bold">{sectionScore}</span>
+                <span className="text-lg font-bold">{totalScore}</span>
               </div>
             </div>
+
+            {currentQuestion.imageUrl ? (
+              <img
+                src={currentQuestion.imageUrl}
+                alt="Celebrity question"
+                className="mb-3 h-52 w-full rounded-xl object-cover"
+                referrerPolicy="no-referrer"
+              />
+            ) : null}
 
             <h2 className="mb-4 text-xl font-semibold">{currentQuestion.question}</h2>
             <div className="space-y-2">
@@ -375,22 +395,22 @@ export default function Home() {
 
             {hasAnswered ? (
               <button onClick={() => void goNextQuestion()} className="mt-4 w-full rounded-xl bg-indigo-600 px-4 py-3 font-semibold text-white">
-                {questionIndex + 1 === QUESTIONS_PER_SECTION ? (isSubmittingScore ? "Saving..." : "Finish section") : "Next question"}
+                {isFinalQuestion ? (isSubmittingScore ? "Saving..." : "Finish category") : isEndOfLevel ? "Advancing to next level..." : "Next question"}
               </button>
             ) : null}
           </section>
         ) : null}
 
-        {screen === "summary" && activeSection ? (
+        {screen === "summary" && activeCategory ? (
           <section className="card bg-white dark:bg-white/5 animate-fade-in">
-            <h2 className="mb-2 text-xl font-semibold">Section summary</h2>
+            <h2 className="mb-2 text-xl font-semibold">Category summary</h2>
             <p className="mb-4 text-sm text-slate-600 dark:text-slate-300">
-              {activeSection.title} completed.
+              {activeCategory.title} completed (all 10 levels).
             </p>
             <div className="grid grid-cols-3 gap-2 text-center">
               <div className="rounded-xl bg-slate-50 p-3 dark:bg-white/5">
                 <div className="text-xs text-slate-500">Score</div>
-                <div className="text-xl font-bold">{sectionScore}</div>
+                <div className="text-xl font-bold">{totalScore}</div>
               </div>
               <div className="rounded-xl bg-slate-50 p-3 dark:bg-white/5">
                 <div className="text-xs text-slate-500">Correct</div>
@@ -402,8 +422,8 @@ export default function Home() {
               </div>
             </div>
             <div className="mt-4 flex gap-2">
-              <button onClick={replaySection} className="w-full rounded-xl border border-slate-300 px-4 py-3 font-semibold dark:border-white/20">
-                Replay section
+              <button onClick={replayCategory} className="w-full rounded-xl border border-slate-300 px-4 py-3 font-semibold dark:border-white/20">
+                Replay category
               </button>
               <button onClick={() => setScreen("menu")} className="w-full rounded-xl bg-indigo-600 px-4 py-3 font-semibold text-white">
                 Main menu
@@ -420,7 +440,7 @@ export default function Home() {
 
         {screen !== "quiz" ? (
           <section className="card bg-white dark:bg-white/5">
-            <div className="text-sm text-slate-600 dark:text-slate-300">10 categories x 10 questions = 100 total questions.</div>
+            <div className="text-sm text-slate-600 dark:text-slate-300">10 categories x 10 levels x 10 questions per run.</div>
           </section>
         ) : null}
       </div>

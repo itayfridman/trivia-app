@@ -7,48 +7,56 @@ export type TriviaQuestion = {
   answers: string[];
   correctAnswerIndex: number;
   explanation: string;
+  imageUrl?: string;
 };
 
 export const allQuestions = questions as TriviaQuestion[];
 
-export const TOTAL_LEVELS = allQuestions.length;
-export const QUESTIONS_PER_SECTION = 10;
-export const TOTAL_SECTIONS = 10;
+export const LEVELS_PER_CATEGORY = 10;
+export const QUESTIONS_PER_LEVEL = 10;
+export const QUESTIONS_PER_CATEGORY_RUN = LEVELS_PER_CATEGORY * QUESTIONS_PER_LEVEL;
 
-export const SECTION_CATEGORIES = [
-  "General Knowledge",
+export const CATEGORY_TITLES = [
+  "Sports",
+  "Music",
+  "Movies",
   "Science",
   "History",
   "Geography",
-  "Sports",
-  "Music",
-  "Movies & TV",
   "Technology",
-  "Art & Literature",
-  "World Culture",
+  "Animals",
+  "Food",
+  "Celebrities",
 ] as const;
 
-export type TriviaSection = {
+export type TriviaCategoryName = (typeof CATEGORY_TITLES)[number];
+
+export type TriviaCategory = {
   id: number;
-  title: string;
+  title: TriviaCategoryName;
   questions: TriviaQuestion[];
 };
 
-export const getSections = (): TriviaSection[] => {
-  const needed = TOTAL_SECTIONS * QUESTIONS_PER_SECTION;
-  const sliced = allQuestions.slice(0, needed);
+const shuffleQuestions = (items: TriviaQuestion[]): TriviaQuestion[] => {
+  const result = [...items];
+  for (let i = result.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
+};
 
-  return Array.from({ length: TOTAL_SECTIONS }, (_, index) => {
-    const start = index * QUESTIONS_PER_SECTION;
-    const end = start + QUESTIONS_PER_SECTION;
-    const sectionQuestions = sliced.slice(start, end).map((question) => ({
-      ...question,
-      category: SECTION_CATEGORIES[index],
-    }));
-    return {
-      id: index + 1,
-      title: SECTION_CATEGORIES[index],
-      questions: sectionQuestions,
-    };
-  });
+export const getCategories = (): TriviaCategory[] =>
+  CATEGORY_TITLES.map((title, index) => ({
+    id: index + 1,
+    title,
+    questions: allQuestions.filter((question) => question.category === title),
+  }));
+
+export const buildCategoryRun = (category: TriviaCategory): TriviaQuestion[] => {
+  const run: TriviaQuestion[] = [];
+  while (run.length < QUESTIONS_PER_CATEGORY_RUN) {
+    run.push(...shuffleQuestions(category.questions));
+  }
+  return run.slice(0, QUESTIONS_PER_CATEGORY_RUN);
 };
