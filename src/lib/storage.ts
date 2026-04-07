@@ -1,17 +1,13 @@
 export type StoredProgress = {
-  totalCorrect: number;
-  streak: number;
-  lastPlayedDate: string | null;
-  answersByDate: Record<string, { questionId: string; isCorrect: boolean }>;
+  currentLevel: number; // 1..100
 };
 
-const STORAGE_KEY = "trivia-yomit-progress-v1";
+const STORAGE_KEY = "trivia-levels-progress-v1";
+const MIN_LEVEL = 1;
+const MAX_LEVEL = 100;
 
 export const defaultProgress: StoredProgress = {
-  totalCorrect: 0,
-  streak: 0,
-  lastPlayedDate: null,
-  answersByDate: {},
+  currentLevel: MIN_LEVEL,
 };
 
 export const loadProgress = (): StoredProgress => {
@@ -25,10 +21,14 @@ export const loadProgress = (): StoredProgress => {
       return defaultProgress;
     }
     const parsed = JSON.parse(raw) as StoredProgress;
+    const safeLevel =
+      typeof parsed.currentLevel === "number" && Number.isFinite(parsed.currentLevel)
+        ? Math.min(MAX_LEVEL, Math.max(MIN_LEVEL, Math.floor(parsed.currentLevel)))
+        : defaultProgress.currentLevel;
     return {
       ...defaultProgress,
       ...parsed,
-      answersByDate: parsed.answersByDate ?? {},
+      currentLevel: safeLevel,
     };
   } catch {
     return defaultProgress;

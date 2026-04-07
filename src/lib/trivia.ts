@@ -11,16 +11,10 @@ export type TriviaQuestion = {
 
 export const allQuestions = questions as TriviaQuestion[];
 
-export const getTodayKey = (): string => {
-  const now = new Date();
-  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(
-    2,
-    "0",
-  )}-${String(now.getUTCDate()).padStart(2, "0")}`;
-};
+export const TOTAL_LEVELS = 100;
 
-export const getQuestionOfTheDay = (): TriviaQuestion => {
-  const dayNumber = Math.floor(Date.now() / 86_400_000);
-  const index = dayNumber % allQuestions.length;
+export const getQuestionForLevel = (level: number): TriviaQuestion => {
+  const safeLevel = Math.min(TOTAL_LEVELS, Math.max(1, Math.floor(level)));
+  const index = (safeLevel - 1) % allQuestions.length;
   return allQuestions[index];
 };
