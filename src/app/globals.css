@@ -15,6 +15,24 @@ body {
   color: #f8fafc;
 }
 
+.animated-gradient {
+  background: linear-gradient(-45deg, #7c3aed, #2563eb, #0ea5e9, #14b8a6, #7c3aed);
+  background-size: 300% 300%;
+  animation: gradientShift 16s ease infinite;
+}
+
+@keyframes gradientShift {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
 .card {
   @apply rounded-2xl border border-white/10 bg-white/5 p-4 shadow-lg backdrop-blur-sm;
 }

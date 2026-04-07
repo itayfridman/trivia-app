@@ -1,22 +1,40 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { defaultProgress, loadProgress, saveProgress, type StoredProgress } from "@/lib/storage";
-import { getQuestionForLevel, TOTAL_LEVELS } from "@/lib/trivia";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  defaultProgress,
+  loadLeaderboard,
+  loadProgress,
+  saveProgress,
+  saveScoreToLeaderboard,
+  type LeaderboardEntry,
+  type StoredProgress,
+} from "@/lib/storage";
+import { createSessionQuestions, getQuestionForLevel, TOTAL_LEVELS, type TriviaQuestion } from "@/lib/trivia";
 
 type Theme = "dark" | "light";
 
 export default function Home() {
   const [progress, setProgress] = useState<StoredProgress>(defaultProgress);
+  const [sessionQuestions, setSessionQuestions] = useState<TriviaQuestion[]>([]);
+  const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
+  const [showLeaderboard, setShowLeaderboard] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [feedback, setFeedback] = useState<"correct" | "wrong" | null>(null);
   const [attemptCount, setAttemptCount] = useState(0);
   const [lastPointsAwarded, setLastPointsAwarded] = useState(0);
+  const [hasSavedCurrentRun, setHasSavedCurrentRun] = useState(false);
   const [theme, setTheme] = useState<Theme>("dark");
+  const [isMuted, setIsMuted] = useState(false);
+  const [musicReady, setMusicReady] = useState(false);
+  const audioRef = useRef<HTMLAudioElement>(null);
 
   const currentLevel = progress.currentLevel;
-  const question = useMemo(() => getQuestionForLevel(currentLevel), [currentLevel]);
+  const question = useMemo(() => {
+    if (sessionQuestions.length === 0) return null;
+    return getQuestionForLevel(currentLevel, sessionQuestions);
+  }, [currentLevel, sessionQuestions]);
   const isLevelComplete = feedback === "correct";
 
   useEffect(() => {
@@ -28,11 +46,42 @@ export default function Home() {
 
     const loaded = loadProgress();
     setProgress(loaded);
+    setSessionQuestions(createSessionQuestions());
+    setLeaderboard(loadLeaderboard());
     setIsLoaded(true);
   }, []);
 
+  useEffect(() => {
+    const audioElement = audioRef.current;
+    if (!audioElement) return;
+
+    audioElement.volume = 0.25;
+    audioElement
+      .play()
+      .then(() => setMusicReady(true))
+      .catch(() => setMusicReady(false));
+  }, []);
+
+  const toggleMute = () => {
+    const audioElement = audioRef.current;
+    if (!audioElement) return;
+    const nextMuted = !isMuted;
+    audioElement.muted = nextMuted;
+    setIsMuted(nextMuted);
+    if (!nextMuted) {
+      audioElement.play().catch(() => undefined);
+    }
+  };
+
+  useEffect(() => {
+    if (feedback === "correct" && currentLevel === TOTAL_LEVELS && !hasSavedCurrentRun) {
+      setLeaderboard(saveScoreToLeaderboard(progress.totalScore, progress.currentLevel));
+      setHasSavedCurrentRun(true);
+    }
+  }, [currentLevel, feedback, hasSavedCurrentRun, progress.currentLevel, progress.totalScore]);
+
   const submitAnswer = (index: number) => {
-    if (!isLoaded || isLevelComplete) {
+    if (!isLoaded || isLevelComplete || !question) {
       return;
     }
 
@@ -75,13 +124,18 @@ export default function Home() {
 
   const restart = () => {
     if (!isLoaded) return;
+    if (progress.totalScore > 0) {
+      setLeaderboard(saveScoreToLeaderboard(progress.totalScore, progress.currentLevel));
+    }
     const nextProgress: StoredProgress = { ...progress, currentLevel: 1, totalScore: 0 };
     setProgress(nextProgress);
     saveProgress(nextProgress);
+    setSessionQuestions(createSessionQuestions());
     setSelectedIndex(null);
     setFeedback(null);
     setAttemptCount(0);
     setLastPointsAwarded(0);
+    setHasSavedCurrentRun(false);
   };
 
   const toggleTheme = () => {
@@ -92,8 +146,27 @@ export default function Home() {
     window.localStorage.setItem("trivia-theme", next);
   };
 
+  const shareOnWhatsApp = () => {
+    const appLink = window.location.href;
+    const message = `I reached level ${currentLevel}/100 with ${progress.totalScore} points! Can you beat me? ${appLink}`;
+    const shareUrl = `https://wa.me/?text=${encodeURIComponent(message)}`;
+    window.open(shareUrl, "_blank", "noopener,noreferrer");
+  };
+
+  if (!question) {
+    return null;
+  }
+
   return (
-    <main className="min-h-screen bg-slate-100 text-slate-900 dark:bg-[#0b1020] dark:text-slate-100">
+    <main className="animated-gradient min-h-screen text-slate-900 dark:text-slate-100">
+      <audio
+        ref={audioRef}
+        src="https://cdn.pixabay.com/download/audio/2022/03/15/audio_c8c8a73467.mp3?filename=lofi-study-112191.mp3"
+        loop
+      />
+      <button onClick={toggleMute} className="fixed right-4 top-4 z-20 rounded-full bg-black/40 px-3 py-2 text-xs text-white">
+        {isMuted ? "Unmute" : "Mute"} music
+      </button>
       <div className="mx-auto flex min-h-screen w-full max-w-lg flex-col gap-4 px-4 py-6">
         <header className="card bg-white dark:bg-white/5">
           <div className="mb-3 flex items-center justify-between">
@@ -108,7 +181,37 @@ export default function Home() {
           <p className="text-sm text-slate-600 dark:text-slate-300">
             100 levels. One question per level. Answer correctly to move forward.
           </p>
+          <div className="mt-3 flex gap-2">
+            <button
+              onClick={() => setShowLeaderboard((value) => !value)}
+              className="rounded-xl border border-slate-300 px-3 py-1 text-sm dark:border-white/20"
+            >
+              {showLeaderboard ? "Hide leaderboard" : "Global leaderboard"}
+            </button>
+            {!musicReady && (
+              <div className="rounded-xl border border-amber-300 px-3 py-1 text-xs text-amber-700 dark:border-amber-400/50 dark:text-amber-200">
+                Tap Mute/Unmute to start music
+              </div>
+            )}
+          </div>
         </header>
+
+        {showLeaderboard && (
+          <section className="card bg-white dark:bg-white/5">
+            <h3 className="mb-2 text-lg font-semibold">Top 10 scores</h3>
+            {leaderboard.length === 0 ? (
+              <p className="text-sm text-slate-600 dark:text-slate-300">No scores yet. Finish a run and hit Restart to save your score.</p>
+            ) : (
+              <ol className="space-y-2">
+                {leaderboard.map((entry, index) => (
+                  <li key={`${entry.playedAt}-${entry.score}-${index}`} className="rounded-xl bg-slate-50 p-3 text-sm dark:bg-black/20">
+                    #{index + 1} - {entry.score} pts (level {entry.reachedLevel}/100)
+                  </li>
+                ))}
+              </ol>
+            )}
+          </section>
+        )}
 
         <section className="card bg-white dark:bg-white/5">
           <div className="mb-3">
@@ -180,6 +283,12 @@ export default function Home() {
 
           {feedback === "correct" && (
             <div className="mt-4">
+              <button
+                onClick={shareOnWhatsApp}
+                className="mb-2 w-full rounded-xl border border-emerald-600 bg-emerald-600/10 px-4 py-3 font-semibold text-emerald-700 dark:text-emerald-200"
+              >
+                Share on WhatsApp
+              </button>
               {currentLevel < TOTAL_LEVELS ? (
                 <button
                   onClick={goToNextLevel}
