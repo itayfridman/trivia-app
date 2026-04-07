@@ -3,13 +3,12 @@ export type StoredPlayer = {
 };
 
 export type LeaderboardEntry = {
-  playerName: string;
+  id: number;
+  username: string;
   score: number;
-  sectionId: number;
-  sectionTitle: string;
-  correctAnswers: number;
-  incorrectAnswers: number;
-  playedAt: string;
+  category: string;
+  level: number;
+  created_at: string;
 };
 
 const STORAGE_KEY = "trivia-player-v2";
