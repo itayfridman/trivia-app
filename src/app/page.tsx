@@ -7,6 +7,10 @@ import { LEVELS_PER_CATEGORY, QUESTIONS_PER_LEVEL, fetchLevelQuestions, getCateg
 type Theme = "dark" | "light";
 type Screen = "entry" | "menu" | "quiz" | "summary";
 type Feedback = "correct" | "wrong" | null;
+const QUESTION_TIME_SECONDS = 15;
+const STREAK_BONUS_EVERY = 3;
+const STREAK_BONUS_POINTS = 5;
+const HINT_COST = 5;
 
 export default function Home() {
   const categories = useMemo(() => getCategories(), []);
@@ -21,7 +25,7 @@ export default function Home() {
   const [totalScore, setTotalScore] = useState(0);
   const [correctAnswers, setCorrectAnswers] = useState(0);
   const [incorrectAnswers, setIncorrectAnswers] = useState(0);
-  const [timeLeft, setTimeLeft] = useState(20);
+  const [timeLeft, setTimeLeft] = useState(QUESTION_TIME_SECONDS);
   const [isSubmittingScore, setIsSubmittingScore] = useState(false);
   const [isLoadingQuestions, setIsLoadingQuestions] = useState(false);
   const [leaderboardError, setLeaderboardError] = useState("");
@@ -32,10 +36,20 @@ export default function Home() {
   const [nameError, setNameError] = useState("");
   const [theme, setTheme] = useState<Theme>("dark");
   const [isMuted, setIsMuted] = useState(false);
+  const [streakCount, setStreakCount] = useState(0);
+  const [streakMessage, setStreakMessage] = useState("");
+  const [hiddenAnswerIndex, setHiddenAnswerIndex] = useState<number | null>(null);
+  const [confettiTick, setConfettiTick] = useState(0);
+  const [hasInteracted, setHasInteracted] = useState(false);
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const musicTimerRef = useRef<number | null>(null);
   const askedQuestionIdsRef = useRef<Set<string>>(new Set());
+  const isMutedRef = useRef(isMuted);
+  const totalScoreRef = useRef(totalScore);
+  const playerRef = useRef(player);
+  const activeCategoryRef = useRef(activeCategory);
+  const currentLevelRef = useRef(currentLevel);
 
   const currentQuestion = runQuestions[questionIndex] ?? null;
   const hasAnswered = feedback !== null;
@@ -65,6 +79,26 @@ export default function Home() {
     };
   }, []);
 
+  useEffect(() => {
+    isMutedRef.current = isMuted;
+  }, [isMuted]);
+
+  useEffect(() => {
+    totalScoreRef.current = totalScore;
+  }, [totalScore]);
+
+  useEffect(() => {
+    playerRef.current = player;
+  }, [player]);
+
+  useEffect(() => {
+    activeCategoryRef.current = activeCategory;
+  }, [activeCategory]);
+
+  useEffect(() => {
+    currentLevelRef.current = currentLevel;
+  }, [currentLevel]);
+
   const getAudioContext = () => {
     if (!audioContextRef.current) {
       audioContextRef.current = new window.AudioContext();
@@ -80,14 +114,14 @@ export default function Home() {
   };
 
   const startBackgroundMusic = async () => {
-    if (isMuted || musicTimerRef.current !== null) return;
+    if (isMutedRef.current || musicTimerRef.current !== null) return;
     const context = getAudioContext();
     if (context.state === "suspended") await context.resume();
 
     const melody = [261.63, 329.63, 392.0, 523.25, 392.0, 329.63];
     let index = 0;
     const playNote = () => {
-      if (isMuted) return;
+      if (isMutedRef.current) return;
       const now = context.currentTime;
       const osc = context.createOscillator();
       const gain = context.createGain();
@@ -107,7 +141,7 @@ export default function Home() {
   };
 
   const playEffect = async (kind: "good" | "bad") => {
-    if (isMuted) return;
+    if (isMutedRef.current) return;
     const context = getAudioContext();
     if (context.state === "suspended") await context.resume();
     const now = context.currentTime;
@@ -144,11 +178,27 @@ export default function Home() {
   };
 
   const toggleMute = () => {
-    const nextMuted = !isMuted;
-    setIsMuted(nextMuted);
-    if (nextMuted) stopBackgroundMusic();
-    if (!nextMuted) void startBackgroundMusic();
+    setIsMuted((prev) => !prev);
   };
+
+  useEffect(() => {
+    if (!hasInteracted) return;
+    if (isMuted) {
+      stopBackgroundMusic();
+      return;
+    }
+    void startBackgroundMusic();
+  }, [hasInteracted, isMuted]);
+
+  useEffect(() => {
+    const onFirstInteraction = () => setHasInteracted(true);
+    window.addEventListener("pointerdown", onFirstInteraction, { once: true });
+    window.addEventListener("keydown", onFirstInteraction, { once: true });
+    return () => {
+      window.removeEventListener("pointerdown", onFirstInteraction);
+      window.removeEventListener("keydown", onFirstInteraction);
+    };
+  }, []);
 
   const loadLeaderboard = async () => {
     try {
@@ -179,7 +229,9 @@ export default function Home() {
       setQuestionIndex(0);
       setSelectedIndex(null);
       setFeedback(null);
-      setTimeLeft(20);
+      setTimeLeft(QUESTION_TIME_SECONDS);
+      setHiddenAnswerIndex(null);
+      setStreakMessage("");
       setLeaderboardError("");
     } catch {
       setLeaderboardError("Could not load questions for this level. Please try again.");
@@ -203,49 +255,19 @@ export default function Home() {
     return () => window.clearInterval(timer);
   }, [screen, currentQuestion, hasAnswered, isLoadingQuestions]);
 
-  const submitAnswer = (index: number, timedOut = false) => {
-    if (!currentQuestion || hasAnswered) return;
-    const isCorrect = index === currentQuestion.correctAnswerIndex;
-    setSelectedIndex(index >= 0 ? index : null);
-    setFeedback(isCorrect ? "correct" : "wrong");
-    if (isCorrect) {
-      setTotalScore((prev) => prev + 10);
-      setCorrectAnswers((prev) => prev + 1);
-      void playEffect("good");
-      return;
-    }
-    setIncorrectAnswers((prev) => prev + 1);
-    if (timedOut) setLeaderboardError("Time is up for this question.");
-    void playEffect("bad");
-  };
-
-  const goNextQuestion = async () => {
-    if (!activeCategory || !hasAnswered) return;
-    if (questionIndex + 1 < QUESTIONS_PER_LEVEL) {
-      setQuestionIndex((prev) => prev + 1);
-      setSelectedIndex(null);
-      setFeedback(null);
-      setTimeLeft(20);
-      return;
-    }
-
-    if (currentLevel < LEVELS_PER_CATEGORY) {
-      const nextLevel = currentLevel + 1;
-      setCurrentLevel(nextLevel);
-      await loadLevel(activeCategory, nextLevel);
-      return;
-    }
-
-    setIsSubmittingScore(true);
+  const persistScore = async (score: number, level: number) => {
+    const runningCategory = activeCategoryRef.current;
+    const runningPlayer = playerRef.current;
+    if (!runningCategory?.title || !runningPlayer.playerName) return;
     try {
       const response = await fetch("/api/leaderboard", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          username: player.playerName,
-          score: totalScore,
-          category: activeCategory.title,
-          level: LEVELS_PER_CATEGORY,
+          username: runningPlayer.playerName,
+          score,
+          category: runningCategory.title,
+          level,
         }),
       });
       const data = (await response.json()) as { entries: LeaderboardEntry[]; error?: string };
@@ -257,10 +279,56 @@ export default function Home() {
       }
     } catch {
       setLeaderboardError("Could not submit score.");
-    } finally {
-      setIsSubmittingScore(false);
-      setScreen("summary");
     }
+  };
+
+  const submitAnswer = (index: number, timedOut = false) => {
+    if (!currentQuestion || hasAnswered) return;
+    const isCorrect = index === currentQuestion.correctAnswerIndex;
+    setSelectedIndex(index >= 0 ? index : null);
+    setFeedback(isCorrect ? "correct" : "wrong");
+    if (isCorrect) {
+      const nextStreak = streakCount + 1;
+      const withBasePoints = totalScore + 10;
+      const gotStreakBonus = nextStreak % STREAK_BONUS_EVERY === 0;
+      const nextScore = gotStreakBonus ? withBasePoints + STREAK_BONUS_POINTS : withBasePoints;
+      setTotalScore(nextScore);
+      setStreakCount(nextStreak);
+      setStreakMessage(gotStreakBonus ? "🔥 Streak! +5 bonus points" : "");
+      setCorrectAnswers((prev) => prev + 1);
+      setConfettiTick((prev) => prev + 1);
+      void playEffect("good");
+      void persistScore(nextScore, currentLevel);
+      return;
+    }
+    setStreakCount(0);
+    setStreakMessage("");
+    setIncorrectAnswers((prev) => prev + 1);
+    if (timedOut) setLeaderboardError("Time is up for this question.");
+    void playEffect("bad");
+    void persistScore(totalScore, currentLevel);
+  };
+
+  const goNextQuestion = async () => {
+    if (!activeCategory || !hasAnswered) return;
+    if (questionIndex + 1 < QUESTIONS_PER_LEVEL) {
+      setQuestionIndex((prev) => prev + 1);
+      setSelectedIndex(null);
+      setFeedback(null);
+      setTimeLeft(QUESTION_TIME_SECONDS);
+      setHiddenAnswerIndex(null);
+      setStreakMessage("");
+      return;
+    }
+
+    if (currentLevel < LEVELS_PER_CATEGORY) {
+      const nextLevel = currentLevel + 1;
+      setCurrentLevel(nextLevel);
+      await loadLevel(activeCategory, nextLevel);
+      return;
+    }
+
+    setScreen("summary");
   };
 
   useEffect(() => {
@@ -282,11 +350,13 @@ export default function Home() {
     setTotalScore(0);
     setCorrectAnswers(0);
     setIncorrectAnswers(0);
-    setTimeLeft(20);
+    setTimeLeft(QUESTION_TIME_SECONDS);
+    setStreakCount(0);
+    setStreakMessage("");
+    setHiddenAnswerIndex(null);
     setScreen("quiz");
     setLeaderboardError("");
     await loadLevel(category, 1);
-    await startBackgroundMusic();
   };
 
   const replayCategory = () => {
@@ -306,6 +376,29 @@ export default function Home() {
     setPlayerNameInput(cleanedName);
     setNameError("");
     setScreen("menu");
+  };
+
+  const useHint = () => {
+    if (!currentQuestion || hasAnswered || hiddenAnswerIndex !== null || totalScore < HINT_COST) return;
+    const wrongChoices = currentQuestion.answers
+      .map((_, idx) => idx)
+      .filter((idx) => idx !== currentQuestion.correctAnswerIndex);
+    if (wrongChoices.length === 0) return;
+    const eliminateIndex = wrongChoices[Math.floor(Math.random() * wrongChoices.length)];
+    setHiddenAnswerIndex(eliminateIndex);
+    setTotalScore((prev) => Math.max(0, prev - HINT_COST));
+  };
+
+  const exitQuizToMenu = async () => {
+    if (screen !== "quiz") return;
+    setIsSubmittingScore(true);
+    await persistScore(totalScoreRef.current, currentLevelRef.current);
+    setIsSubmittingScore(false);
+    setScreen("menu");
+    setFeedback(null);
+    setSelectedIndex(null);
+    setStreakMessage("");
+    setHiddenAnswerIndex(null);
   };
 
   const toggleTheme = () => {
@@ -345,9 +438,9 @@ export default function Home() {
 
         {showLeaderboard && (
           <section className="card bg-white dark:bg-white/5">
-            <h3 className="mb-2 text-lg font-semibold">Top 10 scores</h3>
+            <h3 className="mb-2 text-lg font-semibold">All players (best score)</h3>
             {leaderboard.length === 0 ? (
-              <p className="text-sm text-slate-600 dark:text-slate-300">No scores yet. Complete at least one category run to appear here.</p>
+              <p className="text-sm text-slate-600 dark:text-slate-300">No scores yet. Answer at least one question to appear here.</p>
             ) : (
               <ol className="space-y-2">
                 {leaderboard.map((entry, index) => (
@@ -367,6 +460,12 @@ export default function Home() {
             <input
               value={playerNameInput}
               onChange={(event) => setPlayerNameInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  savePlayerName();
+                }
+              }}
               maxLength={24}
               placeholder="Name or nickname"
               className="mb-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-slate-900 outline-none ring-indigo-300 focus:ring-2 dark:border-white/20 dark:bg-black/20 dark:text-white"
@@ -412,6 +511,12 @@ export default function Home() {
                   </div>
                   <div className="rounded-full bg-slate-100 px-2 py-1 text-xs dark:bg-white/10">Time: {timeLeft}s</div>
                 </div>
+                <div className="mb-3 h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-white/10">
+                  <div
+                    className="h-full bg-indigo-500 transition-all duration-1000"
+                    style={{ width: `${Math.max(0, (timeLeft / QUESTION_TIME_SECONDS) * 100)}%` }}
+                  />
+                </div>
 
                 <div className="mb-4 rounded-xl bg-slate-50 p-3 text-sm dark:bg-black/20">
                   <div className="flex items-center justify-between">
@@ -422,11 +527,30 @@ export default function Home() {
                     <span>Current score</span>
                     <span className="text-lg font-bold">{totalScore}</span>
                   </div>
+                  <div className="mt-2 flex items-center justify-between">
+                    <span>Streak</span>
+                    <span className="font-semibold">{streakCount}</span>
+                  </div>
                 </div>
 
                 <h2 className="mb-4 text-xl font-semibold">{currentQuestion.question}</h2>
+                <div className="mb-3 flex gap-2">
+                  <button
+                    onClick={useHint}
+                    disabled={hasAnswered || hiddenAnswerIndex !== null || totalScore < HINT_COST}
+                    className="rounded-xl border border-amber-400 px-3 py-2 text-sm font-semibold text-amber-700 disabled:cursor-not-allowed disabled:opacity-50 dark:text-amber-300"
+                  >
+                    Hint (-{HINT_COST} pts)
+                  </button>
+                  <button onClick={() => void exitQuizToMenu()} className="rounded-xl border border-rose-400 px-3 py-2 text-sm font-semibold text-rose-600 dark:text-rose-300">
+                    {isSubmittingScore ? "Saving..." : "Exit quiz"}
+                  </button>
+                </div>
                 <div className="space-y-2">
                   {currentQuestion.answers.map((answer, index) => {
+                    if (index === hiddenAnswerIndex && !hasAnswered) {
+                      return null;
+                    }
                     const isCorrect = index === currentQuestion.correctAnswerIndex;
                     const isPicked = selectedIndex === index;
                     const showCorrect = hasAnswered && isCorrect;
@@ -457,13 +581,29 @@ export default function Home() {
                     <p className={`mb-2 font-semibold ${feedback === "correct" ? "text-emerald-500" : "text-rose-500"}`}>
                       {feedback === "correct" ? "Correct!" : "Incorrect."}
                     </p>
+                    {streakMessage && <p className="mb-2 text-sm font-semibold text-amber-500">{streakMessage}</p>}
                     <p className="text-sm text-slate-700 dark:text-slate-200">{currentQuestion.explanation}</p>
                   </div>
                 )}
 
+                {feedback === "correct" ? (
+                  <div key={confettiTick} className="confetti-layer" aria-hidden="true">
+                    {Array.from({ length: 18 }).map((_, idx) => (
+                      <span
+                        key={`${confettiTick}-${idx}`}
+                        className="confetti-piece"
+                        style={{
+                          left: `${(idx / 18) * 100}%`,
+                          animationDelay: `${(idx % 6) * 0.06}s`,
+                        }}
+                      />
+                    ))}
+                  </div>
+                ) : null}
+
                 {hasAnswered ? (
                   <button onClick={() => void goNextQuestion()} className="mt-4 w-full rounded-xl bg-indigo-600 px-4 py-3 font-semibold text-white">
-                    {isFinalQuestion ? (isSubmittingScore ? "Saving..." : "Finish category") : isEndOfLevel ? "Advancing to next level..." : "Next question"}
+                    {isFinalQuestion ? "Finish category" : isEndOfLevel ? "Advancing to next level..." : "Next question"}
                   </button>
                 ) : null}
               </>

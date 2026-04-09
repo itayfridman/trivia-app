@@ -51,6 +51,26 @@ const sanitizePayload = (payload: Partial<ScorePayload>): ScorePayload | null =>
   return { username, score, category, level };
 };
 
+const mapBestScoresByPlayer = (rows: LeaderboardEntry[]): LeaderboardEntry[] => {
+  const byUser = new Map<string, LeaderboardEntry>();
+  rows.forEach((row) => {
+    const existing = byUser.get(row.username);
+    if (!existing) {
+      byUser.set(row.username, row);
+      return;
+    }
+    const rowTime = new Date(row.created_at).getTime();
+    const existingTime = new Date(existing.created_at).getTime();
+    if (row.score > existing.score || (row.score === existing.score && rowTime > existingTime)) {
+      byUser.set(row.username, row);
+    }
+  });
+  return [...byUser.values()].sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+  });
+};
+
 export async function GET() {
   const supabase = getSupabase();
   if (!supabase) {
@@ -60,13 +80,12 @@ export async function GET() {
     .from("scores")
     .select("id, username, score, category, level, created_at")
     .order("score", { ascending: false })
-    .order("created_at", { ascending: true })
-    .limit(10);
+    .order("created_at", { ascending: true });
 
   if (error) {
     return NextResponse.json({ error: "Could not load leaderboard.", entries: [] }, { status: 500 });
   }
-  return NextResponse.json({ entries: (data ?? []) as LeaderboardEntry[] });
+  return NextResponse.json({ entries: mapBestScoresByPlayer((data ?? []) as LeaderboardEntry[]) });
 }
 
 export async function POST(request: Request) {
@@ -90,11 +109,10 @@ export async function POST(request: Request) {
     .from("scores")
     .select("id, username, score, category, level, created_at")
     .order("score", { ascending: false })
-    .order("created_at", { ascending: true })
-    .limit(10);
+    .order("created_at", { ascending: true });
 
   if (error) {
     return NextResponse.json({ error: "Could not load leaderboard." }, { status: 500 });
   }
-  return NextResponse.json({ entries: (data ?? []) as LeaderboardEntry[] });
+  return NextResponse.json({ entries: mapBestScoresByPlayer((data ?? []) as LeaderboardEntry[]) });
 }

@@ -15,6 +15,11 @@ body {
   color: #f8fafc;
 }
 
+html.light body {
+  background: #eef2ff;
+  color: #0f172a;
+}
+
 .animated-gradient {
   background: linear-gradient(-45deg, #7c3aed, #2563eb, #0ea5e9, #14b8a6, #7c3aed);
   background-size: 300% 300%;
@@ -41,6 +46,38 @@ body {
   animation: fadeIn 220ms ease-out;
 }
 
+.confetti-layer {
+  pointer-events: none;
+  position: relative;
+  height: 0;
+}
+
+.confetti-piece {
+  position: absolute;
+  top: -8px;
+  width: 8px;
+  height: 12px;
+  border-radius: 2px;
+  opacity: 0;
+  animation: confettiDrop 750ms ease-out forwards;
+}
+
+.confetti-piece:nth-child(4n + 1) {
+  background: #f97316;
+}
+
+.confetti-piece:nth-child(4n + 2) {
+  background: #22c55e;
+}
+
+.confetti-piece:nth-child(4n + 3) {
+  background: #3b82f6;
+}
+
+.confetti-piece:nth-child(4n + 4) {
+  background: #eab308;
+}
+
 @keyframes fadeIn {
   from {
     opacity: 0;
@@ -49,5 +86,16 @@ body {
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes confettiDrop {
+  0% {
+    opacity: 1;
+    transform: translateY(0) rotate(0deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(54px) rotate(260deg);
   }
 }
