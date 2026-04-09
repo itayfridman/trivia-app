@@ -32,6 +32,7 @@ type MatchProgressPayload = {
 };
 
 const getTodayUtcDate = (): string => new Date().toISOString().slice(0, 10);
+const MATCH_STALE_MS = 1000 * 60 * 20;
 
 const getSupabase = () => {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -72,6 +73,7 @@ export async function GET(request: Request) {
   const action = searchParams.get("action");
 
   if (action === "daily") {
+    const playerId = sanitizePlayerId(searchParams.get("playerId"));
     const today = getTodayUtcDate();
     const { data, error } = await supabase
       .from("daily_challenge_results")
@@ -82,11 +84,22 @@ export async function GET(request: Request) {
     if (error) {
       return NextResponse.json({ error: "Could not load daily challenge data." }, { status: 500 });
     }
+    let hasAttemptedToday = false;
+    if (playerId) {
+      const { data: mine } = await supabase
+        .from("daily_challenge_results")
+        .select("player_id")
+        .eq("challenge_date", today)
+        .eq("player_id", playerId)
+        .limit(1);
+      hasAttemptedToday = Boolean(mine && mine.length > 0);
+    }
     return NextResponse.json({
       today,
       questions: getDailyQuestions(),
       completedCount: data?.length ?? 0,
       top3: (data ?? []).slice(0, 3),
+      hasAttemptedToday,
     });
   }
 
@@ -142,7 +155,16 @@ export async function POST(request: Request) {
     const score = Math.max(0, Math.floor(Number(payload.score ?? 0)));
     const correctAnswers = Math.max(0, Math.floor(Number(payload.correctAnswers ?? 0)));
     const totalTimeMs = Math.max(0, Math.floor(Number(payload.totalTimeMs ?? 0)));
-    const { error } = await supabase.from("daily_challenge_results").upsert({
+    const { data: existing } = await supabase
+      .from("daily_challenge_results")
+      .select("player_id")
+      .eq("challenge_date", today)
+      .eq("player_id", playerId)
+      .limit(1);
+    if (existing && existing.length > 0) {
+      return NextResponse.json({ error: "You already completed today's challenge.", today }, { status: 409 });
+    }
+    const { error } = await supabase.from("daily_challenge_results").insert({
       challenge_date: today,
       player_id: playerId,
       score,
@@ -167,6 +189,56 @@ export async function POST(request: Request) {
       if (!friendId || friendId === playerId) {
         return NextResponse.json({ error: "Invalid friend ID." }, { status: 400 });
       }
+      const { data: existingActive } = await supabase
+        .from("matches")
+        .select("*")
+        .or(`and(player1_id.eq.${playerId},player2_id.eq.${friendId}),and(player1_id.eq.${friendId},player2_id.eq.${playerId})`)
+        .eq("mode", "friend")
+        .eq("status", "active")
+        .order("created_at", { ascending: false })
+        .limit(1);
+      if (existingActive && existingActive.length > 0) {
+        return NextResponse.json({ match: existingActive[0] });
+      }
+
+      const { data: incomingPending } = await supabase
+        .from("matches")
+        .select("*")
+        .eq("mode", "friend")
+        .eq("status", "pending")
+        .eq("player1_id", friendId)
+        .eq("player2_id", playerId)
+        .order("created_at", { ascending: false })
+        .limit(1);
+      if (incomingPending && incomingPending.length > 0) {
+        const selected = incomingPending[0];
+        const { data: activated, error: activateError } = await supabase
+          .from("matches")
+          .update({ status: "active" })
+          .eq("id", selected.id)
+          .select("*")
+          .single();
+        if (activateError || !activated) {
+          return NextResponse.json({ error: "Could not join friend match." }, { status: 500 });
+        }
+        return NextResponse.json({ match: activated });
+      }
+
+      const staleBefore = new Date(Date.now() - MATCH_STALE_MS).toISOString();
+      const { data: waitingInvite } = await supabase
+        .from("matches")
+        .select("*")
+        .eq("mode", "friend")
+        .eq("status", "pending")
+        .eq("player1_id", playerId)
+        .eq("player2_id", friendId)
+        .gte("created_at", staleBefore)
+        .order("created_at", { ascending: false })
+        .limit(1);
+      if (waitingInvite && waitingInvite.length > 0) {
+        return NextResponse.json({ waiting: true, match: waitingInvite[0] });
+      }
+
       const qs = getDailyQuestions();
       const { data, error } = await supabase
         .from("matches")
@@ -174,7 +246,7 @@ export async function POST(request: Request) {
           player1_id: playerId,
           player2_id: friendId,
           mode: "friend",
-          status: "active",
+          status: "pending",
           questions: qs,
           created_at: new Date().toISOString(),
         })
@@ -183,7 +255,7 @@ export async function POST(request: Request) {
       if (error) {
         return NextResponse.json({ error: "Could not create match." }, { status: 500 });
       }
-      return NextResponse.json({ match: data });
+      return NextResponse.json({ waiting: true, match: data });
     }
 
     const { data: queued } = await supabase

@@ -31,6 +31,7 @@ type MatchState = {
   player1_id: string;
   player2_id: string;
   questions: TriviaQuestion[];
+  status?: "pending" | "active" | "finished";
 };
 
 const getTodayUtcDate = (): string => new Date().toISOString().slice(0, 10);
@@ -66,6 +67,7 @@ export default function Home() {
   const [nameError, setNameError] = useState("");
   const [theme, setTheme] = useState<Theme>("dark");
   const [isMuted, setIsMuted] = useState(false);
+  const [volume, setVolume] = useState(70);
   const [streakCount, setStreakCount] = useState(0);
   const [streakMessage, setStreakMessage] = useState("");
   const [hiddenAnswerIndex, setHiddenAnswerIndex] = useState<number | null>(null);
@@ -81,8 +83,15 @@ export default function Home() {
   const [matchState, setMatchState] = useState<MatchState | null>(null);
   const [isMatchmaking, setIsMatchmaking] = useState(false);
   const [opponentProgress, setOpponentProgress] = useState({ answered: 0, correct: 0 });
+  const [multiAnsweredThisQuestion, setMultiAnsweredThisQuestion] = useState(false);
+  const [showNameEditor, setShowNameEditor] = useState(false);
+  const [dailyHasAttempted, setDailyHasAttempted] = useState(false);
+  const [showShop, setShowShop] = useState(false);
+  const [isStartingCheckout, setIsStartingCheckout] = useState(false);
+  const [checkoutMessage, setCheckoutMessage] = useState("");
 
   const audioContextRef = useRef<AudioContext | null>(null);
+  const masterGainRef = useRef<GainNode | null>(null);
   const musicTimerRef = useRef<number | null>(null);
   const askedQuestionIdsRef = useRef<Set<string>>(new Set());
   const isMutedRef = useRef(isMuted);
@@ -94,6 +103,10 @@ export default function Home() {
   const multiAnsweredRef = useRef(0);
   const multiCorrectRef = useRef(0);
   const multiTimeRef = useRef(0);
+  const multiStartTimeRef = useRef(0);
+  const matchChannelRef = useRef<ReturnType<NonNullable<typeof supabaseRef.current>["channel"]> | null>(null);
+  const friendPollingRef = useRef<number | null>(null);
+  const randomPollingRef = useRef<number | null>(null);
 
   const currentQuestion = runQuestions[questionIndex] ?? null;
   const currentDailyQuestion = dailyState?.questions[dailyQuestionIndex] ?? null;
@@ -123,6 +136,15 @@ export default function Home() {
       if (musicTimerRef.current !== null) {
         window.clearInterval(musicTimerRef.current);
       }
+      if (friendPollingRef.current !== null) {
+        window.clearInterval(friendPollingRef.current);
+      }
+      if (randomPollingRef.current !== null) {
+        window.clearInterval(randomPollingRef.current);
+      }
+      if (matchChannelRef.current && supabaseRef.current) {
+        void supabaseRef.current.removeChannel(matchChannelRef.current);
+      }
       audioContextRef.current?.close().catch(() => undefined);
     };
   }, []);
@@ -150,6 +172,9 @@ export default function Home() {
   const getAudioContext = () => {
     if (!audioContextRef.current) {
       audioContextRef.current = new window.AudioContext();
+      masterGainRef.current = audioContextRef.current.createGain();
+      masterGainRef.current.gain.value = isMutedRef.current ? 0 : volume / 100;
+      masterGainRef.current.connect(audioContextRef.current.destination);
     }
     return audioContextRef.current;
   };
@@ -166,26 +191,39 @@ export default function Home() {
     const context = getAudioContext();
     if (context.state === "suspended") await context.resume();
 
-    const melody = [261.63, 329.63, 392.0, 523.25, 392.0, 329.63];
+    const melody = [523.25, 659.25, 783.99, 659.25, 698.46, 783.99, 880.0, 783.99];
+    const bassline = [130.81, 146.83, 164.81, 174.61];
     let index = 0;
     const playNote = () => {
       if (isMutedRef.current) return;
       const now = context.currentTime;
-      const osc = context.createOscillator();
-      const gain = context.createGain();
-      osc.type = "triangle";
-      osc.frequency.setValueAtTime(melody[index % melody.length], now);
-      gain.gain.setValueAtTime(0.0001, now);
-      gain.gain.exponentialRampToValueAtTime(0.05, now + 0.03);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.42);
-      osc.connect(gain);
-      gain.connect(context.destination);
-      osc.start(now);
-      osc.stop(now + 0.45);
+      const lead = context.createOscillator();
+      const leadGain = context.createGain();
+      lead.type = "triangle";
+      lead.frequency.setValueAtTime(melody[index % melody.length], now);
+      leadGain.gain.setValueAtTime(0.0001, now);
+      leadGain.gain.exponentialRampToValueAtTime(0.035, now + 0.03);
+      leadGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.28);
+      lead.connect(leadGain);
+      leadGain.connect(masterGainRef.current ?? context.destination);
+      lead.start(now);
+      lead.stop(now + 0.3);
+
+      const bass = context.createOscillator();
+      const bassGain = context.createGain();
+      bass.type = "sine";
+      bass.frequency.setValueAtTime(bassline[index % bassline.length], now);
+      bassGain.gain.setValueAtTime(0.0001, now);
+      bassGain.gain.exponentialRampToValueAtTime(0.025, now + 0.04);
+      bassGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.35);
+      bass.connect(bassGain);
+      bassGain.connect(masterGainRef.current ?? context.destination);
+      bass.start(now);
+      bass.stop(now + 0.36);
       index += 1;
     };
     playNote();
-    musicTimerRef.current = window.setInterval(playNote, 500);
+    musicTimerRef.current = window.setInterval(playNote, 360);
   };
 
   const playEffect = async (kind: "good" | "bad") => {
@@ -205,7 +243,7 @@ export default function Home() {
         gain.gain.exponentialRampToValueAtTime(0.08, now + idx * 0.12 + 0.03);
         gain.gain.exponentialRampToValueAtTime(0.0001, now + idx * 0.12 + 0.22);
         osc.connect(gain);
-        gain.connect(context.destination);
+        gain.connect(masterGainRef.current ?? context.destination);
         osc.start(now + idx * 0.12);
         osc.stop(now + idx * 0.12 + 0.25);
       });
@@ -220,7 +258,7 @@ export default function Home() {
     gain.gain.setValueAtTime(0.09, now);
     gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.5);
     buzz.connect(gain);
-    gain.connect(context.destination);
+    gain.connect(masterGainRef.current ?? context.destination);
     buzz.start(now);
     buzz.stop(now + 0.5);
   };
@@ -228,6 +266,17 @@ export default function Home() {
   const toggleMute = () => {
     setIsMuted((prev) => !prev);
   };
+
+  useEffect(() => {
+    if (!masterGainRef.current) return;
+    const context = audioContextRef.current;
+    if (!context) return;
+    const now = context.currentTime;
+    const nextValue = isMuted ? 0 : volume / 100;
+    masterGainRef.current.gain.cancelScheduledValues(now);
+    masterGainRef.current.gain.setValueAtTime(masterGainRef.current.gain.value, now);
+    masterGainRef.current.gain.linearRampToValueAtTime(nextValue, now + 0.08);
+  }, [isMuted, volume]);
 
   useEffect(() => {
     if (!hasInteracted) return;
@@ -285,6 +334,21 @@ export default function Home() {
     if (!isLoaded) return;
     void loadLeaderboard();
   }, [isLoaded]);
+
+  useEffect(() => {
+    if (!isLoaded || !player.playerId) return;
+    const loadDailyStatus = async () => {
+      try {
+        const response = await fetch(`/api/game?action=daily&playerId=${encodeURIComponent(player.playerId)}`);
+        if (!response.ok) return;
+        const data = (await response.json()) as { hasAttemptedToday?: boolean };
+        setDailyHasAttempted(Boolean(data.hasAttemptedToday));
+      } catch {
+        // Ignore daily status fetch failures.
+      }
+    };
+    void loadDailyStatus();
+  }, [isLoaded, player.playerId]);
 
   useEffect(() => {
     if (!isLoaded || !player.playerName) return;
@@ -455,6 +519,7 @@ export default function Home() {
     setPlayer(nextPlayer);
     setPlayerNameInput(cleanedName);
     setNameError("");
+    setShowNameEditor(false);
     setScreen("menu");
   };
 
@@ -509,13 +574,14 @@ export default function Home() {
 
   const loadDailyChallenge = async () => {
     try {
-      const response = await fetch("/api/game?action=daily");
-      const data = (await response.json()) as DailyState & { error?: string };
+      const response = await fetch(`/api/game?action=daily&playerId=${encodeURIComponent(player.playerId)}`);
+      const data = (await response.json()) as DailyState & { error?: string; hasAttemptedToday?: boolean };
       if (!response.ok) {
         setLeaderboardError(data.error ?? "Could not load daily challenge.");
         return;
       }
       setDailyState(data);
+      setDailyHasAttempted(Boolean(data.hasAttemptedToday));
       setDailyQuestionIndex(0);
       setDailyScore(0);
       setDailyCorrect(0);
@@ -548,13 +614,13 @@ export default function Home() {
 
   const finishDailyChallenge = async () => {
     if (!dailyState) return;
-    if (player.lastDailyChallengeDate === getTodayUtcDate()) {
+    if (dailyHasAttempted || player.lastDailyChallengeDate === getTodayUtcDate()) {
       setScreen("menu");
       return;
     }
     const totalTimeMs = Math.max(0, Date.now() - dailyStartTimeMs);
     try {
-      await fetch("/api/game", {
+      const response = await fetch("/api/game", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -565,7 +631,14 @@ export default function Home() {
           totalTimeMs,
         }),
       });
+      if (!response.ok) {
+        const data = (await response.json()) as { error?: string };
+        setLeaderboardError(data.error ?? "Could not submit daily challenge.");
+        setScreen("menu");
+        return;
+      }
       setPlayer((prev) => ({ ...prev, lastDailyChallengeDate: dailyState.today }));
+      setDailyHasAttempted(true);
     } catch {
       setLeaderboardError("Could not submit daily challenge.");
     } finally {
@@ -576,6 +649,10 @@ export default function Home() {
 
   const joinRealtimeMatch = (matchId: string) => {
     if (!supabaseRef.current) return;
+    if (matchChannelRef.current) {
+      void supabaseRef.current.removeChannel(matchChannelRef.current);
+      matchChannelRef.current = null;
+    }
     const channel = supabaseRef.current.channel(`match-${matchId}`);
     channel.on("postgres_changes", { event: "*", schema: "public", table: "match_progress", filter: `match_id=eq.${matchId}` }, (payload) => {
       const row = payload.new as { player_id?: string; answered_count?: number; correct_answers?: number };
@@ -586,6 +663,7 @@ export default function Home() {
       });
     });
     void channel.subscribe();
+    matchChannelRef.current = channel;
   };
 
   const reportMatchProgress = async (finished = false) => {
@@ -606,9 +684,11 @@ export default function Home() {
   };
 
   const startFriendMatch = async () => {
+    setIsMatchmaking(true);
     const cleanFriendId = friendIdInput.trim().toUpperCase();
     if (!/^TRV-[A-Z0-9]{4}$/.test(cleanFriendId)) {
       setLeaderboardError("Enter a valid friend Player ID (example: TRV-4X9K).");
+      setIsMatchmaking(false);
       return;
     }
     const response = await fetch("/api/game", {
@@ -616,16 +696,35 @@ export default function Home() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "matchmake", mode: "friend", playerId: player.playerId, friendId: cleanFriendId }),
     });
-    const data = (await response.json()) as { match?: MatchState; error?: string };
+    const data = (await response.json()) as { match?: MatchState; waiting?: boolean; error?: string };
     if (!response.ok || !data.match) {
       setLeaderboardError(data.error ?? "Could not create friend match.");
+      setIsMatchmaking(false);
       return;
     }
+    if (data.waiting || data.match.status === "pending") {
+      setIsMatchmaking(true);
+      setLeaderboardError("Invite sent. Waiting for your friend to join...");
+      if (friendPollingRef.current !== null) {
+        window.clearInterval(friendPollingRef.current);
+      }
+      friendPollingRef.current = window.setInterval(() => {
+        void startFriendMatch();
+      }, 3000);
+      return;
+    }
+    if (friendPollingRef.current !== null) {
+      window.clearInterval(friendPollingRef.current);
+      friendPollingRef.current = null;
+    }
+    setIsMatchmaking(false);
     setMatchState(data.match);
     setScreen("multiplayer");
     setQuestionIndex(0);
+    setMultiAnsweredThisQuestion(false);
     multiAnsweredRef.current = 0;
     multiCorrectRef.current = 0;
+    multiStartTimeRef.current = Date.now();
     multiTimeRef.current = 0;
     joinRealtimeMatch(data.match.id);
   };
@@ -639,8 +738,12 @@ export default function Home() {
     });
     const data = (await response.json()) as { match?: MatchState; waiting?: boolean; error?: string };
     if (data.waiting) {
-      setLeaderboardError("Waiting for opponent... click Random Match again in a few seconds.");
-      setIsMatchmaking(false);
+      setLeaderboardError("Waiting for opponent...");
+      if (randomPollingRef.current === null) {
+        randomPollingRef.current = window.setInterval(() => {
+          void startRandomMatch();
+        }, 2500);
+      }
       return;
     }
     if (!response.ok || !data.match) {
@@ -651,17 +754,27 @@ export default function Home() {
     setMatchState(data.match);
     setScreen("multiplayer");
     setQuestionIndex(0);
+    setMultiAnsweredThisQuestion(false);
     multiAnsweredRef.current = 0;
     multiCorrectRef.current = 0;
+    multiStartTimeRef.current = Date.now();
     multiTimeRef.current = 0;
     setIsMatchmaking(false);
+    if (randomPollingRef.current !== null) {
+      window.clearInterval(randomPollingRef.current);
+      randomPollingRef.current = null;
+    }
     joinRealtimeMatch(data.match.id);
   };
 
   const answerMultiplayer = async (index: number) => {
-    if (!matchState) return;
+    if (!matchState || multiAnsweredThisQuestion) return;
+    setMultiAnsweredThisQuestion(true);
     const question = matchState.questions[questionIndex];
-    if (!question) return;
+    if (!question) {
+      setMultiAnsweredThisQuestion(false);
+      return;
+    }
     const isCorrect = index === question.correctAnswerIndex;
     multiAnsweredRef.current += 1;
     if (isCorrect) {
@@ -670,21 +783,68 @@ export default function Home() {
     } else {
       setPlayer((prev) => ({ ...prev, elo: Math.max(0, prev.elo - ELO_LOSS) }));
     }
+    multiTimeRef.current = Math.max(0, Date.now() - multiStartTimeRef.current);
     await reportMatchProgress(false);
     if (questionIndex + 1 < 10) {
-      setQuestionIndex((prev) => prev + 1);
+      window.setTimeout(() => {
+        setQuestionIndex((prev) => prev + 1);
+        setMultiAnsweredThisQuestion(false);
+      }, 250);
       return;
     }
     await reportMatchProgress(true);
     setScreen("menu");
     setMatchState(null);
+    if (matchChannelRef.current && supabaseRef.current) {
+      void supabaseRef.current.removeChannel(matchChannelRef.current);
+      matchChannelRef.current = null;
+    }
+  };
+
+  const startCheckout = async (packageId: "coins_100" | "coins_500" | "coins_2000") => {
+    setIsStartingCheckout(true);
+    setCheckoutMessage("");
+    try {
+      const response = await fetch("/api/checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ packageId }),
+      });
+      const data = (await response.json()) as { url?: string; comingSoon?: boolean; error?: string };
+      if (!response.ok) {
+        setCheckoutMessage(data.error ?? "Could not start checkout.");
+        return;
+      }
+      if (data.comingSoon || !data.url) {
+        setCheckoutMessage("Shop is coming soon. Stripe is not configured yet.");
+        return;
+      }
+      window.location.href = data.url;
+    } catch {
+      setCheckoutMessage("Could not start checkout.");
+    } finally {
+      setIsStartingCheckout(false);
+    }
   };
 
   return (
     <main className="animated-gradient min-h-screen text-slate-900 transition-all duration-300 dark:text-slate-100">
-      <button onClick={toggleMute} className="fixed right-4 top-4 z-20 rounded-full bg-black/40 px-3 py-2 text-xs text-white">
-        {isMuted ? "Unmute" : "Mute"}
-      </button>
+      <div className="fixed right-4 top-4 z-20 flex items-center gap-2 rounded-full bg-black/40 px-3 py-2 text-xs text-white">
+        <button onClick={toggleMute} className="rounded-full border border-white/30 px-2 py-1">
+          {isMuted ? "Unmute" : "Mute"}
+        </button>
+        <label className="flex items-center gap-2">
+          <span>{Math.round(volume)}%</span>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            value={volume}
+            onChange={(event) => setVolume(Number(event.target.value))}
+            className="w-24 accent-indigo-400"
+          />
+        </label>
+      </div>
       <div className="mx-auto flex min-h-screen w-full max-w-lg flex-col gap-4 px-4 py-6">
         <header className="card bg-white dark:bg-white/5">
           <div className="mb-3 flex items-center justify-between">
@@ -753,15 +913,40 @@ export default function Home() {
                 {player.playerName} | Coins: {player.coins}
               </span>
             </div>
+            <div className="mb-3 flex gap-2">
+              <button onClick={() => setShowNameEditor((prev) => !prev)} className="rounded-xl border border-slate-300 px-3 py-2 text-sm dark:border-white/20">
+                {showNameEditor ? "Cancel name edit" : "Change Name"}
+              </button>
+              <button onClick={() => setShowShop(true)} className="rounded-xl border border-emerald-400 px-3 py-2 text-sm font-semibold text-emerald-700 dark:text-emerald-300">
+                Buy Coins
+              </button>
+            </div>
+            {showNameEditor ? (
+              <div className="mb-3 rounded-xl border border-slate-300 bg-slate-50 p-3 dark:border-white/20 dark:bg-black/20">
+                <div className="mb-2 text-sm font-semibold">Update your display name</div>
+                <div className="flex gap-2">
+                  <input
+                    value={playerNameInput}
+                    onChange={(event) => setPlayerNameInput(event.target.value)}
+                    maxLength={24}
+                    placeholder="New name"
+                    className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 dark:border-white/20 dark:bg-black/20"
+                  />
+                  <button onClick={savePlayerName} className="rounded-xl bg-indigo-600 px-3 py-2 font-semibold text-white">
+                    Save
+                  </button>
+                </div>
+              </div>
+            ) : null}
             <div className="mb-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm dark:border-amber-600/40 dark:bg-amber-500/10">
               <div className="font-semibold">Daily Challenge</div>
               <div>New 10 questions every day at 00:00 UTC for all players.</div>
               <button
                 onClick={() => void loadDailyChallenge()}
-                disabled={player.lastDailyChallengeDate === getTodayUtcDate()}
+                disabled={dailyHasAttempted || player.lastDailyChallengeDate === getTodayUtcDate()}
                 className="mt-2 rounded-lg bg-amber-500 px-3 py-1 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {player.lastDailyChallengeDate === getTodayUtcDate() ? "Already played today" : "Play Daily Challenge"}
+                {dailyHasAttempted || player.lastDailyChallengeDate === getTodayUtcDate() ? "Already played today" : "Play Daily Challenge"}
               </button>
             </div>
             <div className="mb-3 rounded-xl border border-indigo-300 bg-indigo-50 p-3 text-sm dark:border-indigo-700/50 dark:bg-indigo-500/10">
@@ -774,7 +959,7 @@ export default function Home() {
                   className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 dark:border-white/20 dark:bg-black/20"
                 />
                 <button onClick={() => void startFriendMatch()} className="rounded-lg bg-indigo-600 px-3 py-2 text-white">
-                  Challenge
+                  {isMatchmaking ? "Waiting..." : "Challenge"}
                 </button>
               </div>
               <button onClick={() => void startRandomMatch()} disabled={isMatchmaking} className="rounded-lg border border-indigo-500 px-3 py-2 font-semibold text-indigo-700 dark:text-indigo-300">
@@ -996,7 +1181,11 @@ export default function Home() {
                 </div>
               ))}
             </div>
-            {!dailySubmitted && currentDailyQuestion ? (
+            {dailyHasAttempted ? (
+              <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm dark:border-amber-600/40 dark:bg-amber-500/10">
+                You already used today&apos;s daily attempt. Come back tomorrow for a new challenge.
+              </div>
+            ) : !dailySubmitted && currentDailyQuestion ? (
               <>
                 <div className="mb-3 text-sm font-semibold">
                   Question {dailyQuestionIndex + 1}/10
@@ -1019,6 +1208,32 @@ export default function Home() {
                 </button>
               </>
             )}
+            <button onClick={() => setScreen("menu")} className="mt-3 w-full rounded-xl border border-slate-300 px-4 py-2 font-semibold dark:border-white/20">
+              Back to menu
+            </button>
+          </section>
+        ) : null}
+
+        {showShop ? (
+          <section className="card bg-white dark:bg-white/5">
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-xl font-semibold">Coin Shop</h2>
+              <button onClick={() => setShowShop(false)} className="rounded-lg border border-slate-300 px-2 py-1 text-xs dark:border-white/20">
+                Close
+              </button>
+            </div>
+            <div className="space-y-2">
+              <button onClick={() => void startCheckout("coins_100")} disabled={isStartingCheckout} className="w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-left dark:border-white/20 dark:bg-black/20">
+                100 coins - $0.99
+              </button>
+              <button onClick={() => void startCheckout("coins_500")} disabled={isStartingCheckout} className="w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-left dark:border-white/20 dark:bg-black/20">
+                500 coins - $3.99
+              </button>
+              <button onClick={() => void startCheckout("coins_2000")} disabled={isStartingCheckout} className="w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-left dark:border-white/20 dark:bg-black/20">
+                2000 coins - $9.99
+              </button>
+            </div>
+            {checkoutMessage ? <p className="mt-3 text-sm text-amber-600 dark:text-amber-400">{checkoutMessage}</p> : null}
           </section>
         ) : null}
 
@@ -1035,7 +1250,12 @@ export default function Home() {
                 <h3 className="mb-3 text-lg font-semibold">{matchState.questions[questionIndex].question}</h3>
                 <div className="space-y-2">
                   {matchState.questions[questionIndex].answers.map((answer, idx) => (
-                    <button key={`${answer}-${idx}`} onClick={() => void answerMultiplayer(idx)} className="w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-left dark:border-white/20 dark:bg-black/20">
+                    <button
+                      key={`${answer}-${idx}`}
+                      onClick={() => void answerMultiplayer(idx)}
+                      disabled={multiAnsweredThisQuestion}
+                      className="w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-left disabled:opacity-60 dark:border-white/20 dark:bg-black/20"
+                    >
                       {answer}
                     </button>
                   ))}
