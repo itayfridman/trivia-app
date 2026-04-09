@@ -1,16 +1,45 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createClient } from "@supabase/supabase-js";
 import { defaultPlayer, loadPlayer, savePlayer, type LeaderboardEntry, type StoredPlayer } from "@/lib/storage";
 import { LEVELS_PER_CATEGORY, QUESTIONS_PER_LEVEL, fetchLevelQuestions, getCategories, type TriviaCategory, type TriviaQuestion } from "@/lib/trivia";
 
 type Theme = "dark" | "light";
-type Screen = "entry" | "menu" | "quiz" | "summary";
+type Screen = "entry" | "menu" | "quiz" | "summary" | "daily" | "profile" | "multiplayer";
 type Feedback = "correct" | "wrong" | null;
 const QUESTION_TIME_SECONDS = 15;
 const STREAK_BONUS_EVERY = 3;
 const STREAK_BONUS_POINTS = 5;
-const HINT_COST = 5;
+const STREAK_BONUS_COINS = 5;
+const COINS_PER_CORRECT = 10;
+const HINT_COST = 10;
+const SKIP_COST = 15;
+const EXTRA_LIFE_COST = 20;
+const ELO_GAIN = 8;
+const ELO_LOSS = 5;
+
+type DailyState = {
+  today: string;
+  completedCount: number;
+  top3: { player_id: string; score: number; total_time_ms: number }[];
+  questions: TriviaQuestion[];
+};
+
+type MatchState = {
+  id: string;
+  player1_id: string;
+  player2_id: string;
+  questions: TriviaQuestion[];
+};
+
+const getTodayUtcDate = (): string => new Date().toISOString().slice(0, 10);
+const getTierName = (elo: number): "Bronze" | "Silver" | "Gold" | "Platinum" => {
+  if (elo < 1000) return "Bronze";
+  if (elo < 1200) return "Silver";
+  if (elo < 1500) return "Gold";
+  return "Platinum";
+};
 
 export default function Home() {
   const categories = useMemo(() => getCategories(), []);
@@ -33,6 +62,7 @@ export default function Home() {
   const [showLeaderboard, setShowLeaderboard] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
   const [playerNameInput, setPlayerNameInput] = useState("");
+  const [friendIdInput, setFriendIdInput] = useState("");
   const [nameError, setNameError] = useState("");
   const [theme, setTheme] = useState<Theme>("dark");
   const [isMuted, setIsMuted] = useState(false);
@@ -41,6 +71,16 @@ export default function Home() {
   const [hiddenAnswerIndex, setHiddenAnswerIndex] = useState<number | null>(null);
   const [confettiTick, setConfettiTick] = useState(0);
   const [hasInteracted, setHasInteracted] = useState(false);
+  const [extraLives, setExtraLives] = useState(0);
+  const [dailyState, setDailyState] = useState<DailyState | null>(null);
+  const [dailySubmitted, setDailySubmitted] = useState(false);
+  const [dailyQuestionIndex, setDailyQuestionIndex] = useState(0);
+  const [dailyScore, setDailyScore] = useState(0);
+  const [dailyCorrect, setDailyCorrect] = useState(0);
+  const [dailyStartTimeMs, setDailyStartTimeMs] = useState(0);
+  const [matchState, setMatchState] = useState<MatchState | null>(null);
+  const [isMatchmaking, setIsMatchmaking] = useState(false);
+  const [opponentProgress, setOpponentProgress] = useState({ answered: 0, correct: 0 });
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const musicTimerRef = useRef<number | null>(null);
@@ -50,8 +90,13 @@ export default function Home() {
   const playerRef = useRef(player);
   const activeCategoryRef = useRef(activeCategory);
   const currentLevelRef = useRef(currentLevel);
+  const supabaseRef = useRef<ReturnType<typeof createClient> | null>(null);
+  const multiAnsweredRef = useRef(0);
+  const multiCorrectRef = useRef(0);
+  const multiTimeRef = useRef(0);
 
   const currentQuestion = runQuestions[questionIndex] ?? null;
+  const currentDailyQuestion = dailyState?.questions[dailyQuestionIndex] ?? null;
   const hasAnswered = feedback !== null;
   const isEndOfLevel = questionIndex + 1 === QUESTIONS_PER_LEVEL;
   const isFinalQuestion = isEndOfLevel && currentLevel === LEVELS_PER_CATEGORY;
@@ -67,6 +112,9 @@ export default function Home() {
     setPlayer(loadedPlayer);
     setPlayerNameInput(loadedPlayer.playerName);
     setScreen(loadedPlayer.playerName ? "menu" : "entry");
+    if (process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
+      supabaseRef.current = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
+    }
     setIsLoaded(true);
   }, []);
 
@@ -215,10 +263,34 @@ export default function Home() {
     }
   };
 
+  const syncPlayerToSupabase = async (nextPlayer: StoredPlayer) => {
+    try {
+      await fetch("/api/game", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "upsert-player",
+          playerId: nextPlayer.playerId,
+          playerName: nextPlayer.playerName,
+          coins: nextPlayer.coins,
+          elo: nextPlayer.elo,
+        }),
+      });
+    } catch {
+      // Best effort sync only.
+    }
+  };
+
   useEffect(() => {
     if (!isLoaded) return;
     void loadLeaderboard();
   }, [isLoaded]);
+
+  useEffect(() => {
+    if (!isLoaded || !player.playerName) return;
+    savePlayer(player);
+    void syncPlayerToSupabase(player);
+  }, [player, isLoaded]);
 
   const loadLevel = async (category: TriviaCategory, level: number) => {
     setIsLoadingQuestions(true);
@@ -292,18 +364,27 @@ export default function Home() {
       const withBasePoints = totalScore + 10;
       const gotStreakBonus = nextStreak % STREAK_BONUS_EVERY === 0;
       const nextScore = gotStreakBonus ? withBasePoints + STREAK_BONUS_POINTS : withBasePoints;
+      const coinGain = COINS_PER_CORRECT + (gotStreakBonus ? STREAK_BONUS_COINS : 0);
       setTotalScore(nextScore);
       setStreakCount(nextStreak);
-      setStreakMessage(gotStreakBonus ? "🔥 Streak! +5 bonus points" : "");
+      setStreakMessage(gotStreakBonus ? "🔥 Streak! +5 bonus coins" : "");
       setCorrectAnswers((prev) => prev + 1);
+      setPlayer((prev) => ({ ...prev, coins: prev.coins + coinGain, elo: prev.elo + ELO_GAIN }));
       setConfettiTick((prev) => prev + 1);
       void playEffect("good");
       void persistScore(nextScore, currentLevel);
       return;
     }
+    if (!timedOut && extraLives > 0) {
+      setExtraLives((prev) => prev - 1);
+      setFeedback(null);
+      setSelectedIndex(null);
+      return;
+    }
     setStreakCount(0);
     setStreakMessage("");
     setIncorrectAnswers((prev) => prev + 1);
+    setPlayer((prev) => ({ ...prev, elo: Math.max(0, prev.elo - ELO_LOSS) }));
     if (timedOut) setLeaderboardError("Time is up for this question.");
     void playEffect("bad");
     void persistScore(totalScore, currentLevel);
@@ -370,23 +451,34 @@ export default function Home() {
       setNameError("Please enter your name or nickname to start.");
       return;
     }
-    const nextPlayer: StoredPlayer = { playerName: cleanedName };
+    const nextPlayer: StoredPlayer = { ...player, playerName: cleanedName };
     setPlayer(nextPlayer);
-    savePlayer(nextPlayer);
     setPlayerNameInput(cleanedName);
     setNameError("");
     setScreen("menu");
   };
 
   const useHint = () => {
-    if (!currentQuestion || hasAnswered || hiddenAnswerIndex !== null || totalScore < HINT_COST) return;
+    if (!currentQuestion || hasAnswered || hiddenAnswerIndex !== null || player.coins < HINT_COST) return;
     const wrongChoices = currentQuestion.answers
       .map((_, idx) => idx)
       .filter((idx) => idx !== currentQuestion.correctAnswerIndex);
     if (wrongChoices.length === 0) return;
     const eliminateIndex = wrongChoices[Math.floor(Math.random() * wrongChoices.length)];
     setHiddenAnswerIndex(eliminateIndex);
-    setTotalScore((prev) => Math.max(0, prev - HINT_COST));
+    setPlayer((prev) => ({ ...prev, coins: Math.max(0, prev.coins - HINT_COST) }));
+  };
+
+  const useSkip = () => {
+    if (!currentQuestion || hasAnswered || player.coins < SKIP_COST) return;
+    setPlayer((prev) => ({ ...prev, coins: Math.max(0, prev.coins - SKIP_COST) }));
+    setFeedback("wrong");
+  };
+
+  const buyExtraLife = () => {
+    if (player.coins < EXTRA_LIFE_COST) return;
+    setPlayer((prev) => ({ ...prev, coins: Math.max(0, prev.coins - EXTRA_LIFE_COST) }));
+    setExtraLives((prev) => prev + 1);
   };
 
   const exitQuizToMenu = async () => {
@@ -415,6 +507,179 @@ export default function Home() {
     window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, "_blank", "noopener,noreferrer");
   };
 
+  const loadDailyChallenge = async () => {
+    try {
+      const response = await fetch("/api/game?action=daily");
+      const data = (await response.json()) as DailyState & { error?: string };
+      if (!response.ok) {
+        setLeaderboardError(data.error ?? "Could not load daily challenge.");
+        return;
+      }
+      setDailyState(data);
+      setDailyQuestionIndex(0);
+      setDailyScore(0);
+      setDailyCorrect(0);
+      setDailyStartTimeMs(Date.now());
+      setDailySubmitted(false);
+      setScreen("daily");
+    } catch {
+      setLeaderboardError("Could not load daily challenge.");
+    }
+  };
+
+  const submitDailyAnswer = (answerIdx: number) => {
+    if (!currentDailyQuestion || dailySubmitted) return;
+    const isCorrect = answerIdx === currentDailyQuestion.correctAnswerIndex;
+    multiAnsweredRef.current += 1;
+    if (isCorrect) {
+      multiCorrectRef.current += 1;
+      setDailyCorrect((prev) => prev + 1);
+      setDailyScore((prev) => prev + 10);
+      setPlayer((prev) => ({ ...prev, coins: prev.coins + COINS_PER_CORRECT, elo: prev.elo + ELO_GAIN }));
+    } else {
+      setPlayer((prev) => ({ ...prev, elo: Math.max(0, prev.elo - ELO_LOSS) }));
+    }
+    if (dailyQuestionIndex + 1 < 10) {
+      setDailyQuestionIndex((prev) => prev + 1);
+      return;
+    }
+    setDailySubmitted(true);
+  };
+
+  const finishDailyChallenge = async () => {
+    if (!dailyState) return;
+    if (player.lastDailyChallengeDate === getTodayUtcDate()) {
+      setScreen("menu");
+      return;
+    }
+    const totalTimeMs = Math.max(0, Date.now() - dailyStartTimeMs);
+    try {
+      await fetch("/api/game", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "daily-submit",
+          playerId: player.playerId,
+          score: dailyScore,
+          correctAnswers: dailyCorrect,
+          totalTimeMs,
+        }),
+      });
+      setPlayer((prev) => ({ ...prev, lastDailyChallengeDate: dailyState.today }));
+    } catch {
+      setLeaderboardError("Could not submit daily challenge.");
+    } finally {
+      setScreen("menu");
+      void loadDailyChallenge();
+    }
+  };
+
+  const joinRealtimeMatch = (matchId: string) => {
+    if (!supabaseRef.current) return;
+    const channel = supabaseRef.current.channel(`match-${matchId}`);
+    channel.on("postgres_changes", { event: "*", schema: "public", table: "match_progress", filter: `match_id=eq.${matchId}` }, (payload) => {
+      const row = payload.new as { player_id?: string; answered_count?: number; correct_answers?: number };
+      if (!row || row.player_id === player.playerId) return;
+      setOpponentProgress({
+        answered: row.answered_count ?? 0,
+        correct: row.correct_answers ?? 0,
+      });
+    });
+    void channel.subscribe();
+  };
+
+  const reportMatchProgress = async (finished = false) => {
+    if (!matchState) return;
+    await fetch("/api/game", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "match-progress",
+        matchId: matchState.id,
+        playerId: player.playerId,
+        answeredCount: multiAnsweredRef.current,
+        correctAnswers: multiCorrectRef.current,
+        totalTimeMs: multiTimeRef.current,
+        finished,
+      }),
+    });
+  };
+
+  const startFriendMatch = async () => {
+    const cleanFriendId = friendIdInput.trim().toUpperCase();
+    if (!/^TRV-[A-Z0-9]{4}$/.test(cleanFriendId)) {
+      setLeaderboardError("Enter a valid friend Player ID (example: TRV-4X9K).");
+      return;
+    }
+    const response = await fetch("/api/game", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "matchmake", mode: "friend", playerId: player.playerId, friendId: cleanFriendId }),
+    });
+    const data = (await response.json()) as { match?: MatchState; error?: string };
+    if (!response.ok || !data.match) {
+      setLeaderboardError(data.error ?? "Could not create friend match.");
+      return;
+    }
+    setMatchState(data.match);
+    setScreen("multiplayer");
+    setQuestionIndex(0);
+    multiAnsweredRef.current = 0;
+    multiCorrectRef.current = 0;
+    multiTimeRef.current = 0;
+    joinRealtimeMatch(data.match.id);
+  };
+
+  const startRandomMatch = async () => {
+    setIsMatchmaking(true);
+    const response = await fetch("/api/game", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "matchmake", mode: "random", playerId: player.playerId }),
+    });
+    const data = (await response.json()) as { match?: MatchState; waiting?: boolean; error?: string };
+    if (data.waiting) {
+      setLeaderboardError("Waiting for opponent... click Random Match again in a few seconds.");
+      setIsMatchmaking(false);
+      return;
+    }
+    if (!response.ok || !data.match) {
+      setLeaderboardError(data.error ?? "Could not start random match.");
+      setIsMatchmaking(false);
+      return;
+    }
+    setMatchState(data.match);
+    setScreen("multiplayer");
+    setQuestionIndex(0);
+    multiAnsweredRef.current = 0;
+    multiCorrectRef.current = 0;
+    multiTimeRef.current = 0;
+    setIsMatchmaking(false);
+    joinRealtimeMatch(data.match.id);
+  };
+
+  const answerMultiplayer = async (index: number) => {
+    if (!matchState) return;
+    const question = matchState.questions[questionIndex];
+    if (!question) return;
+    const isCorrect = index === question.correctAnswerIndex;
+    multiAnsweredRef.current += 1;
+    if (isCorrect) {
+      multiCorrectRef.current += 1;
+      setPlayer((prev) => ({ ...prev, coins: prev.coins + COINS_PER_CORRECT, elo: prev.elo + ELO_GAIN }));
+    } else {
+      setPlayer((prev) => ({ ...prev, elo: Math.max(0, prev.elo - ELO_LOSS) }));
+    }
+    await reportMatchProgress(false);
+    if (questionIndex + 1 < 10) {
+      setQuestionIndex((prev) => prev + 1);
+      return;
+    }
+    await reportMatchProgress(true);
+    setScreen("menu");
+    setMatchState(null);
+  };
+
   return (
     <main className="animated-gradient min-h-screen text-slate-900 transition-all duration-300 dark:text-slate-100">
       <button onClick={toggleMute} className="fixed right-4 top-4 z-20 rounded-full bg-black/40 px-3 py-2 text-xs text-white">
@@ -432,6 +697,9 @@ export default function Home() {
           <div className="mt-3 flex gap-2">
             <button onClick={() => setShowLeaderboard((value) => !value)} className="rounded-xl border border-slate-300 px-3 py-1 text-sm dark:border-white/20">
               {showLeaderboard ? "Hide leaderboard" : "Global leaderboard"}
+            </button>
+            <button onClick={() => setScreen("profile")} className="rounded-xl border border-slate-300 px-3 py-1 text-sm dark:border-white/20">
+              Profile
             </button>
           </div>
         </header>
@@ -481,7 +749,40 @@ export default function Home() {
           <section className="card bg-white dark:bg-white/5">
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-xl font-semibold">Choose a category</h2>
-              <span className="text-sm text-slate-600 dark:text-slate-300">{player.playerName}</span>
+              <span className="text-sm text-slate-600 dark:text-slate-300">
+                {player.playerName} | Coins: {player.coins}
+              </span>
+            </div>
+            <div className="mb-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm dark:border-amber-600/40 dark:bg-amber-500/10">
+              <div className="font-semibold">Daily Challenge</div>
+              <div>New 10 questions every day at 00:00 UTC for all players.</div>
+              <button
+                onClick={() => void loadDailyChallenge()}
+                disabled={player.lastDailyChallengeDate === getTodayUtcDate()}
+                className="mt-2 rounded-lg bg-amber-500 px-3 py-1 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {player.lastDailyChallengeDate === getTodayUtcDate() ? "Already played today" : "Play Daily Challenge"}
+              </button>
+            </div>
+            <div className="mb-3 rounded-xl border border-indigo-300 bg-indigo-50 p-3 text-sm dark:border-indigo-700/50 dark:bg-indigo-500/10">
+              <div className="mb-2 font-semibold">1v1 Multiplayer</div>
+              <div className="mb-2 flex gap-2">
+                <input
+                  value={friendIdInput}
+                  onChange={(event) => setFriendIdInput(event.target.value.toUpperCase())}
+                  placeholder="Friend ID (TRV-4X9K)"
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 dark:border-white/20 dark:bg-black/20"
+                />
+                <button onClick={() => void startFriendMatch()} className="rounded-lg bg-indigo-600 px-3 py-2 text-white">
+                  Challenge
+                </button>
+              </div>
+              <button onClick={() => void startRandomMatch()} disabled={isMatchmaking} className="rounded-lg border border-indigo-500 px-3 py-2 font-semibold text-indigo-700 dark:text-indigo-300">
+                {isMatchmaking ? "Matching..." : "Random Match"}
+              </button>
+            </div>
+            <div className="mb-3 rounded-xl border border-slate-300 bg-slate-50 p-3 text-xs dark:border-white/20 dark:bg-black/20">
+              Ad placement (main menu)
             </div>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-2">
               {categories.map((category) => (
@@ -528,6 +829,10 @@ export default function Home() {
                     <span className="text-lg font-bold">{totalScore}</span>
                   </div>
                   <div className="mt-2 flex items-center justify-between">
+                    <span>Coins</span>
+                    <span className="font-semibold">{player.coins}</span>
+                  </div>
+                  <div className="mt-2 flex items-center justify-between">
                     <span>Streak</span>
                     <span className="font-semibold">{streakCount}</span>
                   </div>
@@ -537,15 +842,24 @@ export default function Home() {
                 <div className="mb-3 flex gap-2">
                   <button
                     onClick={useHint}
-                    disabled={hasAnswered || hiddenAnswerIndex !== null || totalScore < HINT_COST}
+                    disabled={hasAnswered || hiddenAnswerIndex !== null || player.coins < HINT_COST}
                     className="rounded-xl border border-amber-400 px-3 py-2 text-sm font-semibold text-amber-700 disabled:cursor-not-allowed disabled:opacity-50 dark:text-amber-300"
                   >
-                    Hint (-{HINT_COST} pts)
+                    Hint (-{HINT_COST} coins)
+                  </button>
+                  <button onClick={useSkip} disabled={hasAnswered || player.coins < SKIP_COST} className="rounded-xl border border-blue-400 px-3 py-2 text-sm font-semibold text-blue-600 disabled:opacity-50 dark:text-blue-300">
+                    Skip (-{SKIP_COST})
+                  </button>
+                  <button onClick={buyExtraLife} disabled={player.coins < EXTRA_LIFE_COST} className="rounded-xl border border-emerald-400 px-3 py-2 text-sm font-semibold text-emerald-600 disabled:opacity-50 dark:text-emerald-300">
+                    Extra life (-{EXTRA_LIFE_COST}) [{extraLives}]
                   </button>
                   <button onClick={() => void exitQuizToMenu()} className="rounded-xl border border-rose-400 px-3 py-2 text-sm font-semibold text-rose-600 dark:text-rose-300">
                     {isSubmittingScore ? "Saving..." : "Exit quiz"}
                   </button>
                 </div>
+                {questionIndex > 0 && questionIndex % 2 === 0 ? (
+                  <div className="mb-3 rounded-xl border border-slate-300 bg-slate-50 p-3 text-xs dark:border-white/20 dark:bg-black/20">Ad placement (between questions)</div>
+                ) : null}
                 <div className="space-y-2">
                   {currentQuestion.answers.map((answer, index) => {
                     if (index === hiddenAnswerIndex && !hasAnswered) {
@@ -640,6 +954,96 @@ export default function Home() {
             <button onClick={shareToWhatsapp} className="mt-2 w-full rounded-xl border border-emerald-400 px-4 py-3 font-semibold text-emerald-600 dark:text-emerald-300">
               Share on WhatsApp
             </button>
+          </section>
+        ) : null}
+
+        {screen === "profile" ? (
+          <section className="card bg-white dark:bg-white/5">
+            <h2 className="mb-3 text-xl font-semibold">Player Profile</h2>
+            <div className="space-y-2 text-sm">
+              <div>Player: <span className="font-semibold">{player.playerName}</span></div>
+              <div>
+                Player ID: <span className="font-semibold">{player.playerId}</span>
+                <button
+                  onClick={() => navigator.clipboard.writeText(player.playerId)}
+                  className="ml-2 rounded-lg border border-slate-300 px-2 py-1 text-xs dark:border-white/20"
+                >
+                  Copy
+                </button>
+              </div>
+              <div>Coins: <span className="font-semibold">{player.coins}</span></div>
+              <div>
+                ELO: <span className="font-semibold">{player.elo}</span> ({getTierName(player.elo)})
+              </div>
+            </div>
+            <button onClick={() => setScreen("menu")} className="mt-4 w-full rounded-xl bg-indigo-600 px-4 py-3 font-semibold text-white">
+              Back to menu
+            </button>
+          </section>
+        ) : null}
+
+        {screen === "daily" ? (
+          <section className="card bg-white dark:bg-white/5">
+            <h2 className="mb-2 text-xl font-semibold">Daily Challenge</h2>
+            <p className="mb-2 text-sm text-slate-600 dark:text-slate-300">
+              Completed today: {dailyState?.completedCount ?? 0}
+            </p>
+            <div className="mb-3 rounded-xl bg-slate-50 p-3 text-xs dark:bg-black/20">
+              Top 3 today:
+              {(dailyState?.top3 ?? []).map((item, index) => (
+                <div key={`${item.player_id}-${index}`}>
+                  #{index + 1} {item.player_id} - {item.score} pts
+                </div>
+              ))}
+            </div>
+            {!dailySubmitted && currentDailyQuestion ? (
+              <>
+                <div className="mb-3 text-sm font-semibold">
+                  Question {dailyQuestionIndex + 1}/10
+                </div>
+                <h3 className="mb-3 text-lg font-semibold">{currentDailyQuestion.question}</h3>
+                <div className="space-y-2">
+                  {currentDailyQuestion.answers.map((answer, idx) => (
+                    <button key={`${answer}-${idx}`} onClick={() => submitDailyAnswer(idx)} className="w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-left dark:border-white/20 dark:bg-black/20">
+                      {answer}
+                    </button>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="mb-2">Score: {dailyScore}</div>
+                <div className="mb-3">Correct: {dailyCorrect}/10</div>
+                <button onClick={() => void finishDailyChallenge()} className="w-full rounded-xl bg-indigo-600 px-4 py-3 font-semibold text-white">
+                  Finish Daily Challenge
+                </button>
+              </>
+            )}
+          </section>
+        ) : null}
+
+        {screen === "multiplayer" && matchState ? (
+          <section className="card bg-white dark:bg-white/5">
+            <h2 className="mb-2 text-xl font-semibold">1v1 Match</h2>
+            <p className="mb-2 text-sm">Match ID: {matchState.id}</p>
+            <div className="mb-3 rounded-xl bg-slate-50 p-3 text-xs dark:bg-black/20">
+              Opponent progress: {opponentProgress.answered}/10 answered, {opponentProgress.correct} correct
+            </div>
+            {matchState.questions[questionIndex] ? (
+              <>
+                <div className="mb-2 text-sm font-semibold">Question {questionIndex + 1}/10</div>
+                <h3 className="mb-3 text-lg font-semibold">{matchState.questions[questionIndex].question}</h3>
+                <div className="space-y-2">
+                  {matchState.questions[questionIndex].answers.map((answer, idx) => (
+                    <button key={`${answer}-${idx}`} onClick={() => void answerMultiplayer(idx)} className="w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-left dark:border-white/20 dark:bg-black/20">
+                      {answer}
+                    </button>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <p>Waiting for match questions...</p>
+            )}
           </section>
         ) : null}
 
