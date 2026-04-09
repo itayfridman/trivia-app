@@ -33,13 +33,13 @@ const getSupabase = () => {
   //    );
   // 3) Add env vars in `.env.local`:
   //    NEXT_PUBLIC_SUPABASE_URL=your_project_url
-  //    SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
+  //    NEXT_PUBLIC_SUPABASE_ANON_KEY=your_project_anon_key
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!url || !serviceKey) {
+  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  if (!url || !anonKey) {
     return null;
   }
-  return createClient(url, serviceKey, { auth: { persistSession: false } });
+  return createClient(url, anonKey, { auth: { persistSession: false } });
 };
 
 const sanitizePayload = (payload: Partial<ScorePayload>): ScorePayload | null => {
