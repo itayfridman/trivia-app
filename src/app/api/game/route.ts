@@ -50,15 +50,68 @@ const getSupabase = () => {
 const sanitizePlayerId = (value: unknown): string =>
   typeof value === "string" && /^TRV-[A-Z0-9]{4}$/.test(value.trim().toUpperCase()) ? value.trim().toUpperCase() : "";
 
-const selectDailyQuestions = () => {
-  const pool = [...questions];
-  const picked = [];
-  while (picked.length < 10 && pool.length > 0) {
-    const idx = Math.floor(Math.random() * pool.length);
-    const [next] = pool.splice(idx, 1);
-    picked.push(next);
+const selectDailyQuestions = async () => {
+  try {
+    // Fetch 50 questions from Open Trivia DB to ensure variety
+    const params = new URLSearchParams({
+      amount: "50",
+      type: "multiple",
+    });
+    const response = await fetch(`https://opentdb.com/api.php?${params.toString()}`);
+    if (!response.ok) {
+      throw new Error("Could not fetch daily questions from Open Trivia DB.");
+    }
+    const data = (await response.json()) as { response_code: number; results: any[] };
+    if (!Array.isArray(data.results) || data.results.length === 0) {
+      throw new Error("No questions received from Open Trivia DB.");
+    }
+    
+    // Convert to our format and shuffle
+    const converted = data.results.map((item, index) => {
+      const decodedCorrect = decodeHtml(item.correct_answer);
+      const answers = shuffleAnswers([decodedCorrect, ...item.incorrect_answers.map((answer: string) => decodeHtml(answer))]);
+      return {
+        id: `daily-${Date.now()}-${index}`,
+        category: "Daily Challenge",
+        question: decodeHtml(item.question),
+        answers,
+        correctAnswerIndex: answers.findIndex((answer) => answer === decodedCorrect),
+        explanation: `Difficulty: ${item.difficulty}. Category: ${decodeHtml(item.category)}.`,
+      };
+    });
+    
+    // Shuffle and pick 10 questions
+    const shuffled = shuffleAnswers(converted);
+    return shuffled.slice(0, 10);
+  } catch (error) {
+    console.error('Failed to fetch daily questions from API:', error);
+    // Fallback to local questions if API fails
+    const pool = [...questions];
+    const picked = [];
+    while (picked.length < 10 && pool.length > 0) {
+      const idx = Math.floor(Math.random() * pool.length);
+      const [next] = pool.splice(idx, 1);
+      picked.push(next);
+    }
+    return picked;
   }
-  return picked;
+};
+
+const decodeHtml = (value: string): string => {
+  if (typeof window === "undefined") {
+    return value;
+  }
+  const parser = new DOMParser();
+  return parser.parseFromString(value, "text/html").documentElement.textContent ?? value;
+};
+
+const shuffleAnswers = (items: any[]): any[] => {
+  const result = [...items];
+  for (let i = result.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
 };
 
 const ensureDailyChallenge = async (supabase: any) => {
@@ -74,7 +127,7 @@ const ensureDailyChallenge = async (supabase: any) => {
   if (existing?.questions) {
     return { today, questions: existing.questions as typeof questions };
   }
-  const generated = selectDailyQuestions();
+  const generated = await selectDailyQuestions();
   const { data: inserted, error: insertErr } = await db
     .from("daily_challenges")
     .upsert(

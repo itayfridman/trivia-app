@@ -227,6 +227,19 @@ export default function Home() {
       masterGainRef.current = audioContextRef.current.createGain();
       masterGainRef.current.gain.value = isMutedRef.current ? 0 : volume / 100;
       masterGainRef.current.connect(audioContextRef.current.destination);
+      
+      // iOS-specific: Resume context on first user interaction
+      if (audioContextRef.current.state === 'suspended') {
+        const resumeContext = () => {
+          audioContextRef.current?.resume().catch(() => {});
+          document.removeEventListener('touchstart', resumeContext);
+          document.removeEventListener('touchend', resumeContext);
+          document.removeEventListener('mousedown', resumeContext);
+        };
+        document.addEventListener('touchstart', resumeContext, { once: true });
+        document.addEventListener('touchend', resumeContext, { once: true });
+        document.addEventListener('mousedown', resumeContext, { once: true });
+      }
     }
     return audioContextRef.current;
   };
@@ -241,7 +254,20 @@ export default function Home() {
   const startBackgroundMusic = async () => {
     if (isMutedRef.current || musicTimerRef.current !== null) return;
     const context = getAudioContext();
-    if (context.state === "suspended") await context.resume();
+    
+    // iOS-specific: Ensure context is running
+    if (context.state === "suspended") {
+      await context.resume();
+    }
+    
+    // Create a dummy sound to unlock audio on iOS
+    const unlockOscillator = context.createOscillator();
+    const unlockGain = context.createGain();
+    unlockGain.gain.value = 0.0001;
+    unlockOscillator.connect(unlockGain);
+    unlockGain.connect(masterGainRef.current ?? context.destination);
+    unlockOscillator.start(context.currentTime);
+    unlockOscillator.stop(context.currentTime + 0.01);
 
     const melody = [523.25, 659.25, 783.99, 659.25, 698.46, 783.99, 880.0, 783.99];
     const bassline = [130.81, 146.83, 164.81, 174.61];
@@ -274,14 +300,21 @@ export default function Home() {
       bass.stop(now + 0.36);
       index += 1;
     };
-    playNote();
+    
+    // Start the first note immediately, then set interval
+    setTimeout(playNote, 100);
     musicTimerRef.current = window.setInterval(playNote, 360);
   };
 
   const playEffect = async (kind: "good" | "bad") => {
     if (isMutedRef.current) return;
     const context = getAudioContext();
-    if (context.state === "suspended") await context.resume();
+    
+    // iOS-specific: Ensure context is running
+    if (context.state === "suspended") {
+      await context.resume();
+    }
+    
     const now = context.currentTime;
 
     if (kind === "good") {
@@ -801,6 +834,11 @@ export default function Home() {
       setIsMatchmaking(false);
       return;
     }
+    if (cleanFriendId === player.playerId) {
+      setLeaderboardError("You cannot challenge yourself.");
+      setIsMatchmaking(false);
+      return;
+    }
     const response = await fetch("/api/game", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -827,14 +865,28 @@ export default function Home() {
         });
         void supabaseRef.current.removeChannel(friendChannel);
       }
-      setIsMatchmaking(true);
-      setLeaderboardError("Invite sent. Waiting for your friend to join...");
+      setLeaderboardError("Invite sent! Waiting for your friend to accept...");
       if (friendPollingRef.current !== null) {
         window.clearInterval(friendPollingRef.current);
       }
-      friendPollingRef.current = window.setInterval(() => {
-        void startFriendMatch();
-      }, 3000);
+      friendPollingRef.current = window.setInterval(async () => {
+        const checkResponse = await fetch(`/api/game?action=match&matchId=${encodeURIComponent(data.match!.id)}`);
+        const checkData = (await checkResponse.json()) as { match?: MatchState };
+        if (checkData.match && checkData.match.status === "active") {
+          window.clearInterval(friendPollingRef.current!);
+          friendPollingRef.current = null;
+          setMatchState(checkData.match);
+          setScreen("multiplayer");
+          setQuestionIndex(0);
+          setMultiAnsweredThisQuestion(false);
+          multiAnsweredRef.current = 0;
+          multiCorrectRef.current = 0;
+          multiStartTimeRef.current = Date.now();
+          multiTimeRef.current = 0;
+          setIsMatchmaking(false);
+          joinRealtimeMatch(checkData.match.id);
+        }
+      }, 2000);
       return;
     }
     if (friendPollingRef.current !== null) {
@@ -958,8 +1010,10 @@ export default function Home() {
     if (isCorrect) {
       multiCorrectRef.current += 1;
       setPlayer((prev) => ({ ...prev, coins: prev.coins + COINS_PER_CORRECT, elo: prev.elo + ELO_GAIN }));
+      void playEffect("good");
     } else {
       setPlayer((prev) => ({ ...prev, elo: Math.max(0, prev.elo - ELO_LOSS) }));
+      void playEffect("bad");
     }
     multiTimeRef.current = Math.max(0, Date.now() - multiStartTimeRef.current);
     await reportMatchProgress(false);
@@ -967,10 +1021,11 @@ export default function Home() {
       window.setTimeout(() => {
         setQuestionIndex((prev) => prev + 1);
         setMultiAnsweredThisQuestion(false);
-      }, 250);
+      }, 1200);
       return;
     }
     await reportMatchProgress(true);
+    setLeaderboardError(`Match finished! You got ${multiCorrectRef.current}/10 correct.`);
     setScreen("menu");
     setMatchState(null);
     if (matchChannelRef.current && supabaseRef.current) {
@@ -1420,27 +1475,55 @@ export default function Home() {
             <h2 className="mb-2 text-xl font-semibold">1v1 Match</h2>
             <p className="mb-2 text-sm">Match ID: {matchState.id}</p>
             <div className="mb-3 rounded-xl bg-slate-50 p-3 text-xs dark:bg-black/20">
-              Opponent progress: {opponentProgress.answered}/10 answered, {opponentProgress.correct} correct
+              <div className="mb-2 font-semibold">Live Progress</div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <div className="text-xs text-slate-600 dark:text-slate-400">You</div>
+                  <div className="text-sm font-semibold">{multiAnsweredRef.current}/10 answered</div>
+                  <div className="text-xs text-emerald-600 dark:text-emerald-400">{multiCorrectRef.current} correct</div>
+                </div>
+                <div>
+                  <div className="text-xs text-slate-600 dark:text-slate-400">Opponent</div>
+                  <div className="text-sm font-semibold">{opponentProgress.answered}/10 answered</div>
+                  <div className="text-xs text-emerald-600 dark:text-emerald-400">{opponentProgress.correct} correct</div>
+                </div>
+              </div>
             </div>
             {matchState.questions[questionIndex] ? (
               <>
                 <div className="mb-2 text-sm font-semibold">Question {questionIndex + 1}/10</div>
                 <h3 className="mb-3 text-lg font-semibold">{matchState.questions[questionIndex].question}</h3>
                 <div className="space-y-2">
-                  {matchState.questions[questionIndex].answers.map((answer, idx) => (
-                    <button
-                      key={`${answer}-${idx}`}
-                      onClick={() => void answerMultiplayer(idx)}
-                      disabled={multiAnsweredThisQuestion}
-                      className="w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-left disabled:opacity-60 dark:border-white/20 dark:bg-black/20"
-                    >
-                      {answer}
-                    </button>
-                  ))}
+                  {matchState.questions[questionIndex].answers.map((answer, idx) => {
+                    const isCorrect = idx === matchState.questions[questionIndex].correctAnswerIndex;
+                    const showResult = multiAnsweredThisQuestion;
+                    return (
+                      <button
+                        key={`${answer}-${idx}`}
+                        onClick={() => void answerMultiplayer(idx)}
+                        disabled={multiAnsweredThisQuestion}
+                        className={`w-full rounded-xl border px-3 py-2 text-left transition disabled:cursor-not-allowed ${
+                          showResult && isCorrect
+                            ? "border-emerald-400 bg-emerald-100 text-emerald-900 dark:bg-emerald-500/20 dark:text-emerald-100"
+                            : showResult && !isCorrect
+                              ? "border-rose-400 bg-rose-100 text-rose-900 dark:bg-rose-500/20 dark:text-rose-100"
+                              : "border-slate-300 bg-slate-50 hover:bg-slate-100 dark:border-white/20 dark:bg-black/20 dark:hover:bg-white/10"
+                        } ${multiAnsweredThisQuestion ? "opacity-60" : ""}`}
+                      >
+                        {answer}
+                        {showResult && isCorrect && <span className="ml-2 text-xs font-semibold">✓</span>}
+                      </button>
+                    );
+                  })}
                 </div>
+                {multiAnsweredThisQuestion && (
+                  <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-2 text-center text-sm dark:border-white/10 dark:bg-black/20">
+                    Correct answer shown
+                  </div>
+                )}
               </>
             ) : (
-              <p>Waiting for match questions...</p>
+              <p>Loading questions...</p>
             )}
           </section>
         ) : null}
