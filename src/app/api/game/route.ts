@@ -31,6 +31,12 @@ type MatchProgressPayload = {
   finished: boolean;
 };
 
+type FriendInviteResponsePayload = {
+  playerId: string;
+  matchId: string;
+  accepted: boolean;
+};
+
 const getTodayUtcDate = (): string => new Date().toISOString().slice(0, 10);
 const MATCH_STALE_MS = 1000 * 60 * 20;
 
@@ -44,24 +50,45 @@ const getSupabase = () => {
 const sanitizePlayerId = (value: unknown): string =>
   typeof value === "string" && /^TRV-[A-Z0-9]{4}$/.test(value.trim().toUpperCase()) ? value.trim().toUpperCase() : "";
 
-const getDailyQuestions = () => {
-  const today = getTodayUtcDate();
-  const seed = Number(today.replaceAll("-", ""));
-  const sorted = [...questions].sort((a, b) => {
-    const aHash = Math.abs(hashCode(`${a.id}-${seed}`));
-    const bHash = Math.abs(hashCode(`${b.id}-${seed}`));
-    return aHash - bHash;
-  });
-  return sorted.slice(0, 10);
+const selectDailyQuestions = () => {
+  const pool = [...questions];
+  const picked = [];
+  while (picked.length < 10 && pool.length > 0) {
+    const idx = Math.floor(Math.random() * pool.length);
+    const [next] = pool.splice(idx, 1);
+    picked.push(next);
+  }
+  return picked;
 };
 
-const hashCode = (value: string): number => {
-  let hash = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    hash = (hash << 5) - hash + value.charCodeAt(index);
-    hash |= 0;
+const ensureDailyChallenge = async (supabase: any) => {
+  const today = getTodayUtcDate();
+  const db = supabase as any;
+  const { data: existing, error: readErr } = await db
+    .from("daily_challenges")
+    .select("challenge_date, questions")
+    .eq("challenge_date", today)
+    .limit(1)
+    .maybeSingle();
+  if (readErr) return { error: readErr };
+  if (existing?.questions) {
+    return { today, questions: existing.questions as typeof questions };
   }
-  return hash;
+  const generated = selectDailyQuestions();
+  const { data: inserted, error: insertErr } = await db
+    .from("daily_challenges")
+    .upsert(
+      {
+        challenge_date: today,
+        questions: generated,
+        generated_at: new Date().toISOString(),
+      },
+      { onConflict: "challenge_date" },
+    )
+    .select("challenge_date, questions")
+    .single();
+  if (insertErr) return { error: insertErr };
+  return { today, questions: (inserted?.questions as typeof questions) ?? generated };
 };
 
 export async function GET(request: Request) {
@@ -74,7 +101,11 @@ export async function GET(request: Request) {
 
   if (action === "daily") {
     const playerId = sanitizePlayerId(searchParams.get("playerId"));
-    const today = getTodayUtcDate();
+    const generated = await ensureDailyChallenge(supabase);
+    if ("error" in generated) {
+      return NextResponse.json({ error: "Could not generate daily challenge." }, { status: 500 });
+    }
+    const today = generated.today;
     const { data, error } = await supabase
       .from("daily_challenge_results")
       .select("player_id, score, total_time_ms")
@@ -96,7 +127,7 @@ export async function GET(request: Request) {
     }
     return NextResponse.json({
       today,
-      questions: getDailyQuestions(),
+      questions: generated.questions,
       completedCount: data?.length ?? 0,
       top3: (data ?? []).slice(0, 3),
       hasAttemptedToday,
@@ -239,7 +270,11 @@ export async function POST(request: Request) {
         return NextResponse.json({ waiting: true, match: waitingInvite[0] });
       }
 
-      const qs = getDailyQuestions();
+      const generated = await ensureDailyChallenge(supabase);
+      if ("error" in generated) {
+        return NextResponse.json({ error: "Could not prepare friend match questions." }, { status: 500 });
+      }
+      const qs = generated.questions;
       const { data, error } = await supabase
         .from("matches")
         .insert({
@@ -267,7 +302,11 @@ export async function POST(request: Request) {
 
     if (queued && queued.length > 0) {
       const opponentId = sanitizePlayerId(queued[0].player_id);
-      const qs = getDailyQuestions();
+      const generated = await ensureDailyChallenge(supabase);
+      if ("error" in generated) {
+        return NextResponse.json({ error: "Could not prepare random match questions." }, { status: 500 });
+      }
+      const qs = generated.questions;
       const { data: match, error: matchErr } = await supabase
         .from("matches")
         .insert({
@@ -313,6 +352,42 @@ export async function POST(request: Request) {
       updated_at: new Date().toISOString(),
     });
     return NextResponse.json({ ok: true });
+  }
+
+  if (action === "friend-invite-response") {
+    const payload = body as unknown as FriendInviteResponsePayload;
+    const playerId = sanitizePlayerId(payload.playerId);
+    if (!playerId || !payload.matchId) {
+      return NextResponse.json({ error: "Invalid friend invite response payload." }, { status: 400 });
+    }
+    const { data: match, error: matchErr } = await supabase
+      .from("matches")
+      .select("*")
+      .eq("id", payload.matchId)
+      .eq("mode", "friend")
+      .eq("status", "pending")
+      .single();
+    if (matchErr || !match) {
+      return NextResponse.json({ error: "Invite is no longer available." }, { status: 404 });
+    }
+    if (match.player2_id !== playerId) {
+      return NextResponse.json({ error: "Only invited player can respond." }, { status: 403 });
+    }
+    if (!payload.accepted) {
+      await supabase.from("matches").update({ status: "declined" }).eq("id", payload.matchId);
+      return NextResponse.json({ ok: true, declined: true, matchId: payload.matchId, challengerId: match.player1_id });
+    }
+    const { data: activated, error: activateErr } = await supabase
+      .from("matches")
+      .update({ status: "active" })
+      .eq("id", payload.matchId)
+      .eq("status", "pending")
+      .select("*")
+      .single();
+    if (activateErr || !activated) {
+      return NextResponse.json({ error: "Could not accept invite." }, { status: 500 });
+    }
+    return NextResponse.json({ ok: true, accepted: true, match: activated, challengerId: match.player1_id });
   }
 
   return NextResponse.json({ error: "Unknown action." }, { status: 400 });

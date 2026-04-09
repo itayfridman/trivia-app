@@ -34,7 +34,25 @@ type MatchState = {
   status?: "pending" | "active" | "finished";
 };
 
+type FriendInviteNotification = {
+  matchId: string;
+  challengerId: string;
+  challengerName: string;
+};
+
 const getTodayUtcDate = (): string => new Date().toISOString().slice(0, 10);
+const getMsUntilNextUtcMidnight = (): number => {
+  const now = new Date();
+  const nextMidnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0, 0);
+  return Math.max(0, nextMidnight - now.getTime());
+};
+const formatMsAsClock = (ms: number): string => {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const hours = String(Math.floor(total / 3600)).padStart(2, "0");
+  const minutes = String(Math.floor((total % 3600) / 60)).padStart(2, "0");
+  const seconds = String(total % 60).padStart(2, "0");
+  return `${hours}:${minutes}:${seconds}`;
+};
 const getTierName = (elo: number): "Bronze" | "Silver" | "Gold" | "Platinum" => {
   if (elo < 1000) return "Bronze";
   if (elo < 1200) return "Silver";
@@ -89,6 +107,8 @@ export default function Home() {
   const [showShop, setShowShop] = useState(false);
   const [isStartingCheckout, setIsStartingCheckout] = useState(false);
   const [checkoutMessage, setCheckoutMessage] = useState("");
+  const [incomingInvite, setIncomingInvite] = useState<FriendInviteNotification | null>(null);
+  const [nextDailyCountdownMs, setNextDailyCountdownMs] = useState(getMsUntilNextUtcMidnight());
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const masterGainRef = useRef<GainNode | null>(null);
@@ -107,12 +127,30 @@ export default function Home() {
   const matchChannelRef = useRef<ReturnType<NonNullable<typeof supabaseRef.current>["channel"]> | null>(null);
   const friendPollingRef = useRef<number | null>(null);
   const randomPollingRef = useRef<number | null>(null);
+  const inviteChannelRef = useRef<ReturnType<NonNullable<typeof supabaseRef.current>["channel"]> | null>(null);
 
   const currentQuestion = runQuestions[questionIndex] ?? null;
   const currentDailyQuestion = dailyState?.questions[dailyQuestionIndex] ?? null;
   const hasAnswered = feedback !== null;
   const isEndOfLevel = questionIndex + 1 === QUESTIONS_PER_LEVEL;
   const isFinalQuestion = isEndOfLevel && currentLevel === LEVELS_PER_CATEGORY;
+
+  const AdUnit = ({ slot, label }: { slot: string; label: string }) => {
+    useEffect(() => {
+      try {
+        const ads = window.adsbygoogle as Array<Record<string, unknown>> | undefined;
+        ads?.push({});
+      } catch {
+        // AdSense can fail silently during local development.
+      }
+    }, []);
+    return (
+      <div className="mb-3 rounded-xl border border-slate-300 bg-slate-50 p-3 text-xs dark:border-white/20 dark:bg-black/20">
+        <div className="mb-2 text-[11px] text-slate-500 dark:text-slate-400">{label}</div>
+        <ins className="adsbygoogle block" style={{ display: "block", minHeight: "90px" }} data-ad-client="ca-pub-XXXXXXXXXX" data-ad-slot={slot} data-ad-format="auto" data-full-width-responsive="true" />
+      </div>
+    );
+  };
 
   useEffect(() => {
     const savedTheme = window.localStorage.getItem("trivia-theme") as Theme | null;
@@ -145,8 +183,18 @@ export default function Home() {
       if (matchChannelRef.current && supabaseRef.current) {
         void supabaseRef.current.removeChannel(matchChannelRef.current);
       }
+      if (inviteChannelRef.current && supabaseRef.current) {
+        void supabaseRef.current.removeChannel(inviteChannelRef.current);
+      }
       audioContextRef.current?.close().catch(() => undefined);
     };
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setNextDailyCountdownMs(getMsUntilNextUtcMidnight());
+    }, 1000);
+    return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -171,7 +219,11 @@ export default function Home() {
 
   const getAudioContext = () => {
     if (!audioContextRef.current) {
-      audioContextRef.current = new window.AudioContext();
+      const AudioContextCtor = window.AudioContext ?? (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioContextCtor) {
+        throw new Error("Web Audio is not supported in this browser.");
+      }
+      audioContextRef.current = new AudioContextCtor();
       masterGainRef.current = audioContextRef.current.createGain();
       masterGainRef.current.gain.value = isMutedRef.current ? 0 : volume / 100;
       masterGainRef.current.connect(audioContextRef.current.destination);
@@ -264,6 +316,9 @@ export default function Home() {
   };
 
   const toggleMute = () => {
+    if (audioContextRef.current?.state === "suspended") {
+      void audioContextRef.current.resume();
+    }
     setIsMuted((prev) => !prev);
   };
 
@@ -277,6 +332,12 @@ export default function Home() {
     masterGainRef.current.gain.setValueAtTime(masterGainRef.current.gain.value, now);
     masterGainRef.current.gain.linearRampToValueAtTime(nextValue, now + 0.08);
   }, [isMuted, volume]);
+
+  useEffect(() => {
+    if (audioContextRef.current?.state === "suspended") {
+      void audioContextRef.current.resume();
+    }
+  }, [volume]);
 
   useEffect(() => {
     if (!hasInteracted) return;
@@ -296,6 +357,55 @@ export default function Home() {
       window.removeEventListener("keydown", onFirstInteraction);
     };
   }, []);
+
+  useEffect(() => {
+    if (!supabaseRef.current || !player.playerId || !player.playerName) return;
+    if (inviteChannelRef.current) {
+      void supabaseRef.current.removeChannel(inviteChannelRef.current);
+      inviteChannelRef.current = null;
+    }
+    const channel = supabaseRef.current.channel(`player-${player.playerId}`);
+    channel.on("broadcast", { event: "friend-invite" }, (payload) => {
+      const data = payload.payload as Partial<FriendInviteNotification>;
+      if (!data.matchId || !data.challengerId || !data.challengerName) return;
+      setIncomingInvite({
+        matchId: data.matchId,
+        challengerId: data.challengerId,
+        challengerName: data.challengerName,
+      });
+    });
+    channel.on("broadcast", { event: "invite-response" }, (payload) => {
+      const data = payload.payload as { accepted?: boolean; declined?: boolean; friendId?: string; friendName?: string; match?: MatchState };
+      if (data.accepted && data.match) {
+        setLeaderboardError(`${data.friendName ?? data.friendId ?? "Friend"} accepted your challenge!`);
+        setMatchState(data.match);
+        setScreen("multiplayer");
+        setQuestionIndex(0);
+        setMultiAnsweredThisQuestion(false);
+        multiAnsweredRef.current = 0;
+        multiCorrectRef.current = 0;
+        multiStartTimeRef.current = Date.now();
+        multiTimeRef.current = 0;
+        setIsMatchmaking(false);
+        if (friendPollingRef.current !== null) {
+          window.clearInterval(friendPollingRef.current);
+          friendPollingRef.current = null;
+        }
+        joinRealtimeMatch(data.match.id);
+      } else if (data.declined) {
+        setLeaderboardError(`${data.friendName ?? data.friendId ?? "Friend"} declined your challenge.`);
+        setIsMatchmaking(false);
+      }
+    });
+    void channel.subscribe();
+    inviteChannelRef.current = channel;
+    return () => {
+      if (inviteChannelRef.current && supabaseRef.current) {
+        void supabaseRef.current.removeChannel(inviteChannelRef.current);
+        inviteChannelRef.current = null;
+      }
+    };
+  }, [player.playerId, player.playerName]);
 
   const loadLeaderboard = async () => {
     try {
@@ -703,6 +813,20 @@ export default function Home() {
       return;
     }
     if (data.waiting || data.match.status === "pending") {
+      if (supabaseRef.current) {
+        const friendChannel = supabaseRef.current.channel(`player-${cleanFriendId}`);
+        await friendChannel.subscribe();
+        await friendChannel.send({
+          type: "broadcast",
+          event: "friend-invite",
+          payload: {
+            matchId: data.match.id,
+            challengerId: player.playerId,
+            challengerName: player.playerName,
+          },
+        });
+        void supabaseRef.current.removeChannel(friendChannel);
+      }
       setIsMatchmaking(true);
       setLeaderboardError("Invite sent. Waiting for your friend to join...");
       if (friendPollingRef.current !== null) {
@@ -727,6 +851,60 @@ export default function Home() {
     multiStartTimeRef.current = Date.now();
     multiTimeRef.current = 0;
     joinRealtimeMatch(data.match.id);
+  };
+
+  const respondToInvite = async (accepted: boolean) => {
+    if (!incomingInvite) return;
+    const invite = incomingInvite;
+    setIncomingInvite(null);
+    try {
+      const response = await fetch("/api/game", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "friend-invite-response",
+          playerId: player.playerId,
+          matchId: invite.matchId,
+          accepted,
+        }),
+      });
+      const data = (await response.json()) as { error?: string; match?: MatchState; challengerId?: string };
+      if (!response.ok) {
+        setLeaderboardError(data.error ?? "Could not respond to invite.");
+        return;
+      }
+      if (supabaseRef.current && data.challengerId) {
+        const challengerChannel = supabaseRef.current.channel(`player-${data.challengerId}`);
+        await challengerChannel.subscribe();
+        await challengerChannel.send({
+          type: "broadcast",
+          event: "invite-response",
+          payload: {
+            accepted,
+            declined: !accepted,
+            friendId: player.playerId,
+            friendName: player.playerName,
+            match: data.match,
+          },
+        });
+        void supabaseRef.current.removeChannel(challengerChannel);
+      }
+      if (accepted && data.match) {
+        setMatchState(data.match);
+        setScreen("multiplayer");
+        setQuestionIndex(0);
+        setMultiAnsweredThisQuestion(false);
+        multiAnsweredRef.current = 0;
+        multiCorrectRef.current = 0;
+        multiStartTimeRef.current = Date.now();
+        multiTimeRef.current = 0;
+        joinRealtimeMatch(data.match.id);
+      } else if (!accepted) {
+        setLeaderboardError("Challenge declined.");
+      }
+    } catch {
+      setLeaderboardError("Could not respond to invite.");
+    }
   };
 
   const startRandomMatch = async () => {
@@ -941,6 +1119,7 @@ export default function Home() {
             <div className="mb-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm dark:border-amber-600/40 dark:bg-amber-500/10">
               <div className="font-semibold">Daily Challenge</div>
               <div>New 10 questions every day at 00:00 UTC for all players.</div>
+              <div className="mt-1 text-xs">Next reset in: {formatMsAsClock(nextDailyCountdownMs)} (UTC)</div>
               <button
                 onClick={() => void loadDailyChallenge()}
                 disabled={dailyHasAttempted || player.lastDailyChallengeDate === getTodayUtcDate()}
@@ -966,9 +1145,7 @@ export default function Home() {
                 {isMatchmaking ? "Matching..." : "Random Match"}
               </button>
             </div>
-            <div className="mb-3 rounded-xl border border-slate-300 bg-slate-50 p-3 text-xs dark:border-white/20 dark:bg-black/20">
-              Ad placement (main menu)
-            </div>
+            <AdUnit slot="1000000001" label="AdSense ad (main menu) - replace publisher ID in layout.tsx and this component." />
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-2">
               {categories.map((category) => (
                 <button
@@ -1043,7 +1220,7 @@ export default function Home() {
                   </button>
                 </div>
                 {questionIndex > 0 && questionIndex % 2 === 0 ? (
-                  <div className="mb-3 rounded-xl border border-slate-300 bg-slate-50 p-3 text-xs dark:border-white/20 dark:bg-black/20">Ad placement (between questions)</div>
+                  <AdUnit slot="1000000002" label="AdSense ad (between questions)" />
                 ) : null}
                 <div className="space-y-2">
                   {currentQuestion.answers.map((answer, index) => {
@@ -1139,6 +1316,7 @@ export default function Home() {
             <button onClick={shareToWhatsapp} className="mt-2 w-full rounded-xl border border-emerald-400 px-4 py-3 font-semibold text-emerald-600 dark:text-emerald-300">
               Share on WhatsApp
             </button>
+            <AdUnit slot="1000000003" label="AdSense ad (results screen)" />
           </section>
         ) : null}
 
@@ -1279,6 +1457,22 @@ export default function Home() {
           </section>
         ) : null}
       </div>
+      {incomingInvite ? (
+        <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/45 px-4">
+          <div className="w-full max-w-sm rounded-2xl border border-white/20 bg-slate-900 p-4 text-white shadow-2xl">
+            <h3 className="mb-2 text-lg font-semibold">Challenge Invite</h3>
+            <p className="mb-3 text-sm">{incomingInvite.challengerName} is challenging you! Accept / Decline</p>
+            <div className="flex gap-2">
+              <button onClick={() => void respondToInvite(true)} className="w-full rounded-xl bg-emerald-600 px-3 py-2 font-semibold text-white">
+                Accept
+              </button>
+              <button onClick={() => void respondToInvite(false)} className="w-full rounded-xl border border-white/30 px-3 py-2 font-semibold text-white">
+                Decline
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }
