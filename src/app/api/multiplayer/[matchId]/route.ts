@@ -3,10 +3,10 @@ import { supabase } from '@/lib/supabase'
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { matchId: string } }
+  { params }: { params: Promise<{ matchId: string }> }
 ) {
   try {
-    const { matchId } = params
+    const { matchId } = await params
 
     const { data: match, error } = await supabase
       .from('matches')
@@ -27,10 +27,10 @@ export async function GET(
 
 export async function PUT(
   request: NextRequest,
-  { params }: { params: { matchId: string } }
+  { params }: { params: Promise<{ matchId: string }> }
 ) {
   try {
-    const { matchId } = params
+    const { matchId } = await params
     const { player_id, score } = await request.json()
 
     if (!player_id || typeof score !== 'number') {
@@ -80,10 +80,10 @@ export async function PUT(
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { matchId: string } }
+  { params }: { params: Promise<{ matchId: string }> }
 ) {
   try {
-    const { matchId } = params
+    const { matchId } = await params
     const { player_id, status } = await request.json()
 
     if (!player_id || !status) {
