@@ -196,6 +196,32 @@ export async function GET(request: Request) {
     return NextResponse.json({ match: data });
   }
 
+  if (action === "check-random-match") {
+    const playerId = sanitizePlayerId(searchParams.get("playerId"));
+    if (!playerId) {
+      return NextResponse.json({ error: "Invalid player ID." }, { status: 400 });
+    }
+    
+    // Check if player is in an active match
+    const { data: activeMatch, error: matchError } = await supabase
+      .from("matches")
+      .select("*")
+      .or(`player1_id.eq.${playerId},player2_id.eq.${playerId}`)
+      .eq("status", "active")
+      .eq("mode", "random")
+      .single();
+    
+    if (matchError && matchError.code !== 'PGRST116') {
+      return NextResponse.json({ error: "Database error." }, { status: 500 });
+    }
+    
+    if (activeMatch) {
+      return NextResponse.json({ match: activeMatch });
+    }
+    
+    return NextResponse.json({ waiting: true });
+  }
+
   return NextResponse.json({ error: "Unknown action." }, { status: 400 });
 }
 

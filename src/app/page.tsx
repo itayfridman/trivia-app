@@ -471,7 +471,7 @@ export default function Home() {
       setLeaderboard(data.entries ?? []);
       setLeaderboardError("");
     } catch {
-      setLeaderboardError("Could not load leaderboard right now.");
+      setLeaderboardError(t.couldNotLoadLeaderboard);
     }
   };
 
@@ -533,7 +533,7 @@ export default function Home() {
       setStreakMessage("");
       setLeaderboardError("");
     } catch {
-      setLeaderboardError("Could not load questions for this level. Please try again.");
+      setLeaderboardError(t.couldNotLoadQuestions);
     } finally {
       setIsLoadingQuestions(false);
     }
@@ -577,7 +577,7 @@ export default function Home() {
         setLeaderboardError(data.error ?? "Could not submit score.");
       }
     } catch {
-      setLeaderboardError("Could not submit score.");
+      setLeaderboardError(t.couldNotSubmitScore);
     }
   };
 
@@ -594,7 +594,7 @@ export default function Home() {
       const coinGain = COINS_PER_CORRECT + (gotStreakBonus ? STREAK_BONUS_COINS : 0);
       setTotalScore(nextScore);
       setStreakCount(nextStreak);
-      setStreakMessage(gotStreakBonus ? "🔥 Streak! +5 bonus coins" : "");
+      setStreakMessage(gotStreakBonus ? `🔥 ${t.streakBonus}` : "");
       setCorrectAnswers((prev) => prev + 1);
       setPlayer((prev) => ({ ...prev, coins: prev.coins + coinGain, elo: prev.elo + ELO_GAIN }));
       setConfettiTick((prev) => prev + 1);
@@ -612,7 +612,7 @@ export default function Home() {
     setStreakMessage("");
     setIncorrectAnswers((prev) => prev + 1);
     setPlayer((prev) => ({ ...prev, elo: Math.max(0, prev.elo - ELO_LOSS) }));
-    if (timedOut) setLeaderboardError("Time is up for this question.");
+    if (timedOut) setLeaderboardError(t.timeUp);
     void playEffect("bad");
     void persistScore(totalScore, currentLevel);
   };
@@ -737,17 +737,17 @@ export default function Home() {
 
   const loadDailyChallenge = async () => {
     try {
-      // Check if player already attempted today
-      const leaderboardResponse = await fetch('/api/daily-challenge/leaderboard');
-      const leaderboardData = await leaderboardResponse.json();
-      
-      // Get today's questions
+      // Get today's questions and check if player attempted
       const response = await fetch('/api/daily-challenge');
       if (!response.ok) {
         setLeaderboardError("Could not load daily challenge.");
         return;
       }
       const data = await response.json();
+      
+      // Get leaderboard data
+      const leaderboardResponse = await fetch('/api/daily-challenge/leaderboard');
+      const leaderboardData = await leaderboardResponse.json();
       
       // Check if player has already attempted
       const hasAttempted = player.lastDailyChallengeDate === getTodayUtcDate();
@@ -817,7 +817,7 @@ export default function Home() {
       setDailyHasAttempted(true);
     } catch (error) {
       console.error('Submit daily challenge error:', error);
-      setLeaderboardError("Could not submit daily challenge.");
+      setLeaderboardError(t.couldNotSubmitDailyChallenge);
     } finally {
       setScreen("menu");
       void loadDailyChallenge();
@@ -934,6 +934,9 @@ export default function Home() {
     setMultiAnsweredThisQuestion(false);
     multiAnsweredRef.current = 0;
     multiCorrectRef.current = 0;
+    multiStartTimeRef.current = Date.now();
+    multiTimeRef.current = 0;
+    joinRealtimeMatch(data.match.id);
   };
 
   const respondToInvite = async (accepted: boolean) => {
@@ -986,7 +989,7 @@ export default function Home() {
         setLeaderboardError("Challenge declined.");
       }
     } catch {
-      setLeaderboardError("Could not respond to invite.");
+      setLeaderboardError(t.error);
     }
   };
 
@@ -1005,17 +1008,18 @@ export default function Home() {
       
       if (data.waiting) {
         setLeaderboardError("Waiting for opponent...");
-        // Set up Supabase Realtime subscription for waiting room
-        if (supabaseRef.current) {
-          const waitingChannel = supabaseRef.current.channel('waiting-room');
-          waitingChannel.on('postgres_changes', { 
-            event: '*', 
-            schema: 'public', 
-            table: 'matches',
-            filter: `player1_id=eq.${player.playerId},player2_id=eq.${player.playerId}`
-          }, (payload: any) => {
-            if (payload.new && payload.new.status === 'active') {
-              setMatchState(payload.new);
+        // Poll every 3 seconds for a match
+        if (randomPollingRef.current !== null) {
+          window.clearInterval(randomPollingRef.current);
+        }
+        randomPollingRef.current = window.setInterval(async () => {
+          try {
+            const checkResponse = await fetch(`/api/game?action=check-random-match&playerId=${encodeURIComponent(player.playerId)}`);
+            const checkData = await checkResponse.json();
+            if (checkData.match && checkData.match.status === 'active') {
+              window.clearInterval(randomPollingRef.current!);
+              randomPollingRef.current = null;
+              setMatchState(checkData.match);
               setScreen("multiplayer");
               setQuestionIndex(0);
               setMultiAnsweredThisQuestion(false);
@@ -1024,16 +1028,17 @@ export default function Home() {
               multiStartTimeRef.current = Date.now();
               multiTimeRef.current = 0;
               setIsMatchmaking(false);
-              joinRealtimeMatch(payload.new.id);
+              joinRealtimeMatch(checkData.match.id);
             }
-          });
-          waitingChannel.subscribe();
-        }
+          } catch (error) {
+            console.error('Error checking random match:', error);
+          }
+        }, 3000);
         return;
       }
       
       if (!response.ok || !data.match) {
-        setLeaderboardError(data.error ?? "Could not start random match.");
+        setLeaderboardError(data.error ?? t.couldNotStartRandomMatch);
         setIsMatchmaking(false);
         return;
       }
@@ -1050,7 +1055,7 @@ export default function Home() {
       joinRealtimeMatch(data.match.id);
     } catch (error) {
       console.error('Random match error:', error);
-      setLeaderboardError("Could not start random match.");
+      setLeaderboardError(t.couldNotStartRandomMatch);
       setIsMatchmaking(false);
     }
   };
@@ -1111,7 +1116,7 @@ export default function Home() {
       console.error('Error finishing match:', error);
     }
     
-    setLeaderboardError(`Match finished! You got ${multiCorrectRef.current}/10 correct.`);
+    setLeaderboardError(`${t.matchFinished} ${multiCorrectRef.current}${t.youGotCorrect}`);
     setScreen("menu");
     setMatchState(null);
     if (matchChannelRef.current && supabaseRef.current) {
@@ -1131,16 +1136,16 @@ export default function Home() {
       });
       const data = (await response.json()) as { url?: string; comingSoon?: boolean; error?: string };
       if (!response.ok) {
-        setCheckoutMessage(data.error ?? "Could not start checkout.");
+        setCheckoutMessage(data.error ?? t.couldNotStartCheckout);
         return;
       }
       if (data.comingSoon || !data.url) {
-        setCheckoutMessage("Shop is coming soon. Stripe is not configured yet.");
+        setCheckoutMessage(t.shopComingSoon);
         return;
       }
       window.location.href = data.url;
     } catch {
-      setCheckoutMessage("Could not start checkout.");
+      setCheckoutMessage(t.couldNotStartCheckout);
     } finally {
       setIsStartingCheckout(false);
     }
@@ -1150,7 +1155,7 @@ export default function Home() {
     <main className="animated-gradient min-h-screen text-slate-900 transition-all duration-300 dark:text-slate-100">
       <div className="fixed right-4 top-4 z-20 flex items-center gap-2 rounded-full bg-black/40 px-3 py-2 text-xs text-white">
         <button onClick={toggleMute} className="rounded-full border border-white/30 px-2 py-1">
-          {isMuted ? "Unmute" : "Mute"}
+          {isMuted ? t.unmute : t.mute}
         </button>
         <label className="flex items-center gap-2">
           <span>{Math.round(volume)}%</span>
@@ -1167,7 +1172,7 @@ export default function Home() {
       <div className="mx-auto flex min-h-screen w-full max-w-lg flex-col gap-4 px-4 py-6">
         <header className="card bg-white dark:bg-white/5">
           <div className="mb-3 flex items-center justify-between">
-            <h1 className="text-2xl font-bold">{t.dailyChallenge ? 'Daily Trivia' : 'Daily Trivia'}</h1>
+            <h1 className="text-2xl font-bold">{t.dailyTrivia}</h1>
             <div className="flex gap-2">
               <select 
                 value={language} 
@@ -1179,11 +1184,11 @@ export default function Home() {
                 ))}
               </select>
               <button onClick={toggleTheme} className="rounded-xl border border-slate-300 px-3 py-1 text-sm dark:border-white/20">
-                {theme === "dark" ? "Light mode" : "Dark mode"}
+                {theme === "dark" ? t.lightMode : t.darkMode}
               </button>
             </div>
           </div>
-          <p className="text-sm text-slate-600 dark:text-slate-300">10 categories, 10 levels per category, 10 questions per level.</p>
+          <p className="text-sm text-slate-600 dark:text-slate-300">{t.categoriesDescription}</p>
           <div className="mt-3 flex gap-2">
             <button onClick={() => setShowLeaderboard((value) => !value)} className="rounded-xl border border-slate-300 px-3 py-1 text-sm dark:border-white/20">
               {showLeaderboard ? t.leaderboard : t.leaderboard}
@@ -1196,14 +1201,14 @@ export default function Home() {
 
         {showLeaderboard && (
           <section className="card bg-white dark:bg-white/5">
-            <h3 className="mb-2 text-lg font-semibold">All players (best score)</h3>
+            <h3 className="mb-2 text-lg font-semibold">{t.allPlayers} {t.bestScore}</h3>
             {leaderboard.length === 0 ? (
-              <p className="text-sm text-slate-600 dark:text-slate-300">No scores yet. Answer at least one question to appear here.</p>
+              <p className="text-sm text-slate-600 dark:text-slate-300">{t.noScoresYet}</p>
             ) : (
               <ol className="space-y-2">
                 {leaderboard.map((entry, index) => (
                   <li key={`${entry.id}-${entry.score}-${index}`} className="rounded-xl bg-slate-50 p-3 text-sm dark:bg-black/20">
-                    #{index + 1} - {entry.username}: {entry.score} pts ({entry.category}, lvl {entry.level})
+                    #{index + 1} - {entry.username}: {entry.score} pts ({entry.category}, {t.level} {entry.level})
                   </li>
                 ))}
               </ol>
@@ -1214,7 +1219,7 @@ export default function Home() {
         {screen === "entry" ? (
           <section className="card bg-white dark:bg-white/5">
             <h2 className="mb-2 text-xl font-semibold">{t.enterYourName}</h2>
-            <p className="mb-3 text-sm text-slate-600 dark:text-slate-300">Your name will appear on the leaderboard and in WhatsApp share.</p>
+            <p className="mb-3 text-sm text-slate-600 dark:text-slate-300">{t.nameRequired}</p>
             <input
               value={playerNameInput}
               onChange={(event) => setPlayerNameInput(event.target.value)}
@@ -1238,39 +1243,39 @@ export default function Home() {
         {screen === "menu" ? (
           <section className="card bg-white dark:bg-white/5">
             <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-xl font-semibold">Choose a category</h2>
+              <h2 className="text-xl font-semibold">{t.chooseCategory}</h2>
               <span className="text-sm text-slate-600 dark:text-slate-300">
-                {player.playerName} | Coins: {player.coins}
+                {player.playerName} | {t.coins}: {player.coins}
               </span>
             </div>
             <div className="mb-3 flex gap-2">
               <button onClick={() => setShowNameEditor((prev) => !prev)} className="rounded-xl border border-slate-300 px-3 py-2 text-sm dark:border-white/20">
-                {showNameEditor ? "Cancel name edit" : "Change Name"}
+                {showNameEditor ? t.cancelNameEdit : t.changeName}
               </button>
               <button onClick={() => setShowShop(true)} className="rounded-xl border border-emerald-400 px-3 py-2 text-sm font-semibold text-emerald-700 dark:text-emerald-300">
-                Buy Coins
+                {t.buyCoins}
               </button>
             </div>
             {showNameEditor ? (
               <div className="mb-3 rounded-xl border border-slate-300 bg-slate-50 p-3 dark:border-white/20 dark:bg-black/20">
-                <div className="mb-2 text-sm font-semibold">Update your display name</div>
+                <div className="mb-2 text-sm font-semibold">{t.updateDisplayName}</div>
                 <div className="flex gap-2">
                   <input
                     value={playerNameInput}
                     onChange={(event) => setPlayerNameInput(event.target.value)}
                     maxLength={24}
-                    placeholder="New name"
+                    placeholder={t.newName}
                     className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 dark:border-white/20 dark:bg-black/20"
                   />
                   <button onClick={savePlayerName} className="rounded-xl bg-indigo-600 px-3 py-2 font-semibold text-white">
-                    Save
+                    {t.save}
                   </button>
                 </div>
               </div>
             ) : null}
             <div className="mb-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm dark:border-amber-600/40 dark:bg-amber-500/10">
               <div className="font-semibold">{t.dailyChallenge}</div>
-              <div>New 10 questions every day at 00:00 UTC for all players.</div>
+              <div>{t.newQuestionsEveryDay}</div>
               <div className="mt-1 text-xs">{t.timeUntilNext}: {formatMsAsClock(nextDailyCountdownMs)} (UTC)</div>
               <button
                 onClick={() => void loadDailyChallenge()}
@@ -1294,7 +1299,7 @@ export default function Home() {
                   disabled={isMatchmaking}
                   className="rounded-lg bg-indigo-500 px-3 py-2 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {isMatchmaking ? "Challenging..." : t.challenge}
+                  {isMatchmaking ? t.waitingForFriend : t.challenge}
                 </button>
               </div>
               <button
@@ -1314,8 +1319,8 @@ export default function Home() {
                   className="rounded-xl border border-slate-300 bg-slate-50 px-3 py-4 text-left transition hover:-translate-y-0.5 hover:bg-slate-100 dark:border-white/15 dark:bg-white/5 dark:hover:bg-white/10"
                 >
                   <div className="text-xs text-indigo-500">Category {category.id}</div>
-                  <div className="font-semibold">{category.title}</div>
-                  <div className="text-xs text-slate-500 dark:text-slate-400">10 levels x 10 questions</div>
+                  <div className="font-semibold">{t[category.id as keyof Translation] || category.title}</div>
+                  <div className="text-xs text-slate-500 dark:text-slate-400">10 {t.level}s x 10 {t.questionNumber}s</div>
                 </button>
               ))}
             </div>
@@ -1325,14 +1330,14 @@ export default function Home() {
         {screen === "quiz" && activeCategory ? (
           <section className="card animate-fade-in bg-white dark:bg-white/5">
             {isLoadingQuestions || !currentQuestion ? (
-              <p className="text-sm text-slate-600 dark:text-slate-300">Loading fresh questions for this level...</p>
+              <p className="text-sm text-slate-600 dark:text-slate-300">{t.loadingFreshQuestions}</p>
             ) : (
               <>
                 <div className="mb-3 flex items-center justify-between text-sm">
                   <div className="font-semibold">
-                    Level {currentLevel}/{LEVELS_PER_CATEGORY} - Question {questionIndex + 1}/{QUESTIONS_PER_LEVEL}
+                    {t.level} {currentLevel}/{LEVELS_PER_CATEGORY} - {t.questionNumber} {questionIndex + 1}/{QUESTIONS_PER_LEVEL}
                   </div>
-                  <div className="rounded-full bg-slate-100 px-2 py-1 text-xs dark:bg-white/10">Time: {timeLeft}s</div>
+                  <div className="rounded-full bg-slate-100 px-2 py-1 text-xs dark:bg-white/10">{t.timeLeft}: {timeLeft}s</div>
                 </div>
                 <div className="mb-3 h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-white/10">
                   <div
@@ -1343,19 +1348,19 @@ export default function Home() {
 
                 <div className="mb-4 rounded-xl bg-slate-50 p-3 text-sm dark:bg-black/20">
                   <div className="flex items-center justify-between">
-                    <span>Category</span>
+                    <span>{t.category}</span>
                     <span className="font-semibold">{activeCategory.title}</span>
                   </div>
                   <div className="mt-2 flex items-center justify-between">
-                    <span>Current score</span>
+                    <span>{t.currentScore}</span>
                     <span className="text-lg font-bold">{totalScore}</span>
                   </div>
                   <div className="mt-2 flex items-center justify-between">
-                    <span>Coins</span>
+                    <span>{t.coins}</span>
                     <span className="font-semibold">{player.coins}</span>
                   </div>
                   <div className="mt-2 flex items-center justify-between">
-                    <span>Streak</span>
+                    <span>{t.streak}</span>
                     <span className="font-semibold">{streakCount}</span>
                   </div>
                 </div>
@@ -1367,16 +1372,16 @@ export default function Home() {
                     disabled={hasAnswered || hiddenAnswerIndex !== null || player.coins < HINT_COST}
                     className="rounded-xl border border-amber-400 px-3 py-2 text-sm font-semibold text-amber-700 disabled:cursor-not-allowed disabled:opacity-50 dark:text-amber-300"
                   >
-                    Hint (-{HINT_COST} coins)
+                    {t.hint} (-{HINT_COST} {t.coins.toLowerCase()})
                   </button>
                   <button onClick={useSkip} disabled={hasAnswered || player.coins < SKIP_COST} className="rounded-xl border border-blue-400 px-3 py-2 text-sm font-semibold text-blue-600 disabled:opacity-50 dark:text-blue-300">
-                    Skip (-{SKIP_COST})
+                    {t.skip} (-{SKIP_COST})
                   </button>
                   <button onClick={buyExtraLife} disabled={player.coins < EXTRA_LIFE_COST} className="rounded-xl border border-emerald-400 px-3 py-2 text-sm font-semibold text-emerald-600 disabled:opacity-50 dark:text-emerald-300">
-                    Extra life (-{EXTRA_LIFE_COST}) [{extraLives}]
+                    {t.extraLife} (-{EXTRA_LIFE_COST}) [{extraLives}]
                   </button>
                   <button onClick={() => void exitQuizToMenu()} className="rounded-xl border border-rose-400 px-3 py-2 text-sm font-semibold text-rose-600 dark:text-rose-300">
-                    {isSubmittingScore ? "Saving..." : "Exit quiz"}
+                    {isSubmittingScore ? t.saving : t.exitQuiz}
                   </button>
                 </div>
                 {questionIndex > 0 && questionIndex % 2 === 0 ? (
@@ -1403,7 +1408,7 @@ export default function Home() {
                               ? "border-rose-400 bg-rose-100 text-rose-900 dark:bg-rose-500/20 dark:text-rose-100"
                               : isPicked
                                 ? "border-indigo-500 bg-indigo-50 dark:bg-indigo-500/10"
-                                : "border-slate-300 bg-slate-50 hover:bg-slate-100 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10"
+                                : "border-slate-300 bg-slate-50 hover:bg-slate-100 dark:border-white/10 dark:bg-black/20 dark:hover:bg-white/10"
                         } ${hasAnswered ? "cursor-not-allowed" : ""}`}
                       >
                         {answer}
@@ -1415,7 +1420,7 @@ export default function Home() {
                 {feedback && (
                   <div className="mt-4 rounded-xl border border-white/10 bg-slate-50 p-3 dark:bg-black/20">
                     <p className={`mb-2 font-semibold ${feedback === "correct" ? "text-emerald-500" : "text-rose-500"}`}>
-                      {feedback === "correct" ? "Correct!" : "Incorrect."}
+                      {feedback === "correct" ? t.correct : t.wrong}
                     </p>
                     {streakMessage && <p className="mb-2 text-sm font-semibold text-amber-500">{streakMessage}</p>}
                     <p className="text-sm text-slate-700 dark:text-slate-200">{currentQuestion.explanation}</p>
@@ -1439,7 +1444,7 @@ export default function Home() {
 
                 {hasAnswered ? (
                   <button onClick={() => void goNextQuestion()} className="mt-4 w-full rounded-xl bg-indigo-600 px-4 py-3 font-semibold text-white">
-                    {isFinalQuestion ? "Finish category" : isEndOfLevel ? "Advancing to next level..." : "Next question"}
+                    {isFinalQuestion ? t.finish : isEndOfLevel ? t.next : t.next}
                   </button>
                 ) : null}
               </>
@@ -1449,32 +1454,32 @@ export default function Home() {
 
         {screen === "summary" && activeCategory ? (
           <section className="card animate-fade-in bg-white dark:bg-white/5">
-            <h2 className="mb-2 text-xl font-semibold">Category summary</h2>
-            <p className="mb-4 text-sm text-slate-600 dark:text-slate-300">{activeCategory.title} completed (all 10 levels).</p>
+            <h2 className="mb-2 text-xl font-semibold">{t.categoryCompleted}</h2>
+            <p className="mb-4 text-sm text-slate-600 dark:text-slate-300">{activeCategory.title} {t.all10Levels}</p>
             <div className="grid grid-cols-3 gap-2 text-center">
               <div className="rounded-xl bg-slate-50 p-3 dark:bg-white/5">
-                <div className="text-xs text-slate-500">Score</div>
+                <div className="text-xs text-slate-500">{t.score}</div>
                 <div className="text-xl font-bold">{totalScore}</div>
               </div>
               <div className="rounded-xl bg-slate-50 p-3 dark:bg-white/5">
-                <div className="text-xs text-slate-500">Correct</div>
+                <div className="text-xs text-slate-500">{t.correctAnswers}</div>
                 <div className="text-xl font-bold text-emerald-500">{correctAnswers}</div>
               </div>
               <div className="rounded-xl bg-slate-50 p-3 dark:bg-white/5">
-                <div className="text-xs text-slate-500">Incorrect</div>
+                <div className="text-xs text-slate-500">{t.incorrectAnswers}</div>
                 <div className="text-xl font-bold text-rose-500">{incorrectAnswers}</div>
               </div>
             </div>
             <div className="mt-4 flex gap-2">
               <button onClick={replayCategory} className="w-full rounded-xl border border-slate-300 px-4 py-3 font-semibold dark:border-white/20">
-                Replay category
+                {t.replayCategory}
               </button>
               <button onClick={() => setScreen("menu")} className="w-full rounded-xl bg-indigo-600 px-4 py-3 font-semibold text-white">
-                Main menu
+                {t.mainMenu}
               </button>
             </div>
             <button onClick={shareToWhatsapp} className="mt-2 w-full rounded-xl border border-emerald-400 px-4 py-3 font-semibold text-emerald-600 dark:text-emerald-300">
-              Share on WhatsApp
+              {t.shareOnWhatsapp}
             </button>
             <AdUnit slot="1000000003" label="AdSense ad (results screen)" />
           </section>
@@ -1482,25 +1487,25 @@ export default function Home() {
 
         {screen === "profile" ? (
           <section className="card bg-white dark:bg-white/5">
-            <h2 className="mb-3 text-xl font-semibold">Player Profile</h2>
+            <h2 className="mb-3 text-xl font-semibold">{t.yourStats}</h2>
             <div className="space-y-2 text-sm">
-              <div>Player: <span className="font-semibold">{player.playerName}</span></div>
+              <div>{t.player}: <span className="font-semibold">{player.playerName}</span></div>
               <div>
-                Player ID: <span className="font-semibold">{player.playerId}</span>
+                {t.playerId}: <span className="font-semibold">{player.playerId}</span>
                 <button
                   onClick={() => navigator.clipboard.writeText(player.playerId)}
                   className="ml-2 rounded-lg border border-slate-300 px-2 py-1 text-xs dark:border-white/20"
                 >
-                  Copy
+                  {t.copy}
                 </button>
               </div>
-              <div>Coins: <span className="font-semibold">{player.coins}</span></div>
+              <div>{t.coins}: <span className="font-semibold">{player.coins}</span></div>
               <div>
-                ELO: <span className="font-semibold">{player.elo}</span> ({getTierName(player.elo)})
+                {t.eloRating}: <span className="font-semibold">{player.elo}</span> ({getTierName(player.elo)})
               </div>
             </div>
             <button onClick={() => setScreen("menu")} className="mt-4 w-full rounded-xl bg-indigo-600 px-4 py-3 font-semibold text-white">
-              Back to menu
+              {t.back}
             </button>
           </section>
         ) : null}
@@ -1512,7 +1517,7 @@ export default function Home() {
               {t.attemptsToday}: {dailyState?.completedCount ?? 0}
             </p>
             <div className="mb-3 rounded-xl bg-slate-50 p-3 text-xs dark:bg-black/20">
-              Top 3 today:
+              {t.top3Today}
               {(dailyState?.top3 ?? []).map((item, index) => (
                 <div key={`${item.player_id}-${index}`}>
                   #{index + 1} {item.player_id} - {item.score} pts
@@ -1521,12 +1526,12 @@ export default function Home() {
             </div>
             {dailyHasAttempted ? (
               <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm dark:border-amber-600/40 dark:bg-amber-500/10">
-                You already used today&apos;s daily attempt. Come back tomorrow for a new challenge.
+                {t.tryAgainTomorrow}
               </div>
             ) : !dailySubmitted && currentDailyQuestion ? (
               <>
                 <div className="mb-3 text-sm font-semibold">
-                  Question {dailyQuestionIndex + 1}/10
+                  {t.questionNumber} {dailyQuestionIndex + 1}/10
                 </div>
                 <h3 className="mb-3 text-lg font-semibold">{currentDailyQuestion.question}</h3>
                 <div className="space-y-2">
@@ -1539,8 +1544,8 @@ export default function Home() {
               </>
             ) : (
               <>
-                <div className="mb-2">Score: {dailyScore}</div>
-                <div className="mb-3">Correct: {dailyCorrect}/10</div>
+                <div className="mb-2">{t.score}: {dailyScore}</div>
+                <div className="mb-3">{t.correctAnswers}: {dailyCorrect}/10</div>
                 <button onClick={() => void finishDailyChallenge()} className="w-full rounded-xl bg-indigo-600 px-4 py-3 font-semibold text-white">
                   {t.finish}
                 </button>
@@ -1555,20 +1560,20 @@ export default function Home() {
         {showShop ? (
           <section className="card bg-white dark:bg-white/5">
             <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-xl font-semibold">Coin Shop</h2>
+              <h2 className="text-xl font-semibold">{t.coinShop}</h2>
               <button onClick={() => setShowShop(false)} className="rounded-lg border border-slate-300 px-2 py-1 text-xs dark:border-white/20">
-                Close
+                {t.close}
               </button>
             </div>
             <div className="space-y-2">
               <button onClick={() => void startCheckout("coins_100")} disabled={isStartingCheckout} className="w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-left dark:border-white/20 dark:bg-black/20">
-                100 coins - $0.99
+                {t.coins100}
               </button>
               <button onClick={() => void startCheckout("coins_500")} disabled={isStartingCheckout} className="w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-left dark:border-white/20 dark:bg-black/20">
-                500 coins - $3.99
+                {t.coins500}
               </button>
               <button onClick={() => void startCheckout("coins_2000")} disabled={isStartingCheckout} className="w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-left dark:border-white/20 dark:bg-black/20">
-                2000 coins - $9.99
+                {t.coins2000}
               </button>
             </div>
             {checkoutMessage ? <p className="mt-3 text-sm text-amber-600 dark:text-amber-400">{checkoutMessage}</p> : null}
@@ -1578,25 +1583,25 @@ export default function Home() {
         {screen === "multiplayer" && matchState ? (
           <section className="card bg-white dark:bg-white/5">
             <h2 className="mb-2 text-xl font-semibold">1v1 Match</h2>
-            <p className="mb-2 text-sm">Match ID: {matchState.id}</p>
+            <p className="mb-2 text-sm">{t.matchId}: {matchState.id}</p>
             <div className="mb-3 rounded-xl bg-slate-50 p-3 text-xs dark:bg-black/20">
-              <div className="mb-2 font-semibold">Live Progress</div>
+              <div className="mb-2 font-semibold">{t.liveProgress}</div>
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <div className="text-xs text-slate-600 dark:text-slate-400">You</div>
-                  <div className="text-sm font-semibold">{multiAnsweredRef.current}/10 answered</div>
-                  <div className="text-xs text-emerald-600 dark:text-emerald-400">{multiCorrectRef.current} correct</div>
+                  <div className="text-xs text-slate-600 dark:text-slate-400">{t.you}</div>
+                  <div className="text-sm font-semibold">{multiAnsweredRef.current}/10 {t.answered}</div>
+                  <div className="text-xs text-emerald-600 dark:text-emerald-400">{multiCorrectRef.current} {t.correctAnswer}</div>
                 </div>
                 <div>
-                  <div className="text-xs text-slate-600 dark:text-slate-400">Opponent</div>
-                  <div className="text-sm font-semibold">{opponentProgress.answered}/10 answered</div>
-                  <div className="text-xs text-emerald-600 dark:text-emerald-400">{opponentProgress.correct} correct</div>
+                  <div className="text-xs text-slate-600 dark:text-slate-400">{t.opponent}</div>
+                  <div className="text-sm font-semibold">{opponentProgress.answered}/10 {t.answered}</div>
+                  <div className="text-xs text-emerald-600 dark:text-emerald-400">{opponentProgress.correct} {t.correctAnswer}</div>
                 </div>
               </div>
             </div>
             {matchState.questions[questionIndex] ? (
               <>
-                <div className="mb-2 text-sm font-semibold">Question {questionIndex + 1}/10</div>
+                <div className="mb-2 text-sm font-semibold">{t.questionNumber} {questionIndex + 1}/10</div>
                 <h3 className="mb-3 text-lg font-semibold">{matchState.questions[questionIndex].question}</h3>
                 <div className="space-y-2">
                   {matchState.questions[questionIndex].answers.map((answer, idx) => {
@@ -1623,12 +1628,12 @@ export default function Home() {
                 </div>
                 {multiAnsweredThisQuestion && (
                   <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-2 text-center text-sm dark:border-white/10 dark:bg-black/20">
-                    Correct answer shown
+                    {t.correctAnswerShown}
                   </div>
                 )}
               </>
             ) : (
-              <p>Loading questions...</p>
+              <p>{t.loadingQuestions}</p>
             )}
           </section>
         ) : null}
@@ -1641,21 +1646,21 @@ export default function Home() {
 
         {screen !== "quiz" ? (
           <section className="card bg-white dark:bg-white/5">
-            <div className="text-sm text-slate-600 dark:text-slate-300">10 categories x 10 levels x 10 fresh API questions per run.</div>
+            <div className="text-sm text-slate-600 dark:text-slate-300">{t.categoriesDescription}</div>
           </section>
         ) : null}
       </div>
       {incomingInvite ? (
         <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/45 px-4">
           <div className="w-full max-w-sm rounded-2xl border border-white/20 bg-slate-900 p-4 text-white shadow-2xl">
-            <h3 className="mb-2 text-lg font-semibold">Challenge Invite</h3>
-            <p className="mb-3 text-sm">{incomingInvite.challengerName} is challenging you! Accept / Decline</p>
+            <h3 className="mb-2 text-lg font-semibold">{t.challengeInvite}</h3>
+            <p className="mb-3 text-sm">{incomingInvite.challengerName} {t.challengingYou}</p>
             <div className="flex gap-2">
               <button onClick={() => void respondToInvite(true)} className="w-full rounded-xl bg-emerald-600 px-3 py-2 font-semibold text-white">
-                Accept
+                {t.accept}
               </button>
               <button onClick={() => void respondToInvite(false)} className="w-full rounded-xl border border-white/30 px-3 py-2 font-semibold text-white">
-                Decline
+                {t.decline}
               </button>
             </div>
           </div>
