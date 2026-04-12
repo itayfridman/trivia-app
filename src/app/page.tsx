@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { createClient } from "@supabase/supabase-js";
 import { defaultPlayer, loadPlayer, savePlayer, type LeaderboardEntry, type StoredPlayer } from "@/lib/storage";
 import { LEVELS_PER_CATEGORY, QUESTIONS_PER_LEVEL, fetchLevelQuestions, getCategories, type TriviaCategory, type TriviaQuestion } from "@/lib/trivia";
+import { supabase } from "@/lib/supabase";
+import { translations, type Language, rtlLanguages, languageNames } from "@/lib/translations";
 
 type Theme = "dark" | "light";
 type Screen = "entry" | "menu" | "quiz" | "summary" | "daily" | "profile" | "multiplayer";
@@ -60,10 +61,13 @@ const getTierName = (elo: number): "Bronze" | "Silver" | "Gold" | "Platinum" => 
   return "Platinum";
 };
 
+
 export default function Home() {
   const categories = useMemo(() => getCategories(), []);
   const [player, setPlayer] = useState<StoredPlayer>(defaultPlayer);
   const [screen, setScreen] = useState<Screen>("entry");
+  const [language, setLanguage] = useState<Language>('en');
+  const t = translations[language];
   const [activeCategory, setActiveCategory] = useState<TriviaCategory | null>(null);
   const [runQuestions, setRunQuestions] = useState<TriviaQuestion[]>([]);
   const [currentLevel, setCurrentLevel] = useState(1);
@@ -110,6 +114,15 @@ export default function Home() {
   const [incomingInvite, setIncomingInvite] = useState<FriendInviteNotification | null>(null);
   const [nextDailyCountdownMs, setNextDailyCountdownMs] = useState(getMsUntilNextUtcMidnight());
 
+  const handleLanguageChange = (newLanguage: Language) => {
+    setLanguage(newLanguage);
+    localStorage.setItem("trivia-language", newLanguage);
+    
+    const isRtl = rtlLanguages.includes(newLanguage);
+    document.documentElement.dir = isRtl ? "rtl" : "ltr";
+    document.documentElement.lang = newLanguage;
+  };
+
   const audioContextRef = useRef<AudioContext | null>(null);
   const masterGainRef = useRef<GainNode | null>(null);
   const musicTimerRef = useRef<number | null>(null);
@@ -119,7 +132,7 @@ export default function Home() {
   const playerRef = useRef(player);
   const activeCategoryRef = useRef(activeCategory);
   const currentLevelRef = useRef(currentLevel);
-  const supabaseRef = useRef<ReturnType<typeof createClient> | null>(null);
+  const supabaseRef = useRef<typeof supabase | null>(null);
   const multiAnsweredRef = useRef(0);
   const multiCorrectRef = useRef(0);
   const multiTimeRef = useRef(0);
@@ -159,13 +172,20 @@ export default function Home() {
     document.documentElement.classList.toggle("dark", initialTheme === "dark");
     document.documentElement.classList.toggle("light", initialTheme === "light");
 
+    const savedLanguage = window.localStorage.getItem("trivia-language") as Language | null;
+    const initialLanguage = savedLanguage ?? "en";
+    setLanguage(initialLanguage);
+    
+    // Apply RTL if needed
+    const isRtl = rtlLanguages.includes(initialLanguage);
+    document.documentElement.dir = isRtl ? "rtl" : "ltr";
+    document.documentElement.lang = initialLanguage;
+
     const loadedPlayer = loadPlayer();
     setPlayer(loadedPlayer);
     setPlayerNameInput(loadedPlayer.playerName);
     setScreen(loadedPlayer.playerName ? "menu" : "entry");
-    if (process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
-      supabaseRef.current = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
-    }
+    supabaseRef.current = supabase;
     setIsLoaded(true);
   }, []);
 
@@ -717,21 +737,36 @@ export default function Home() {
 
   const loadDailyChallenge = async () => {
     try {
-      const response = await fetch(`/api/game?action=daily&playerId=${encodeURIComponent(player.playerId)}`);
-      const data = (await response.json()) as DailyState & { error?: string; hasAttemptedToday?: boolean };
+      // Check if player already attempted today
+      const leaderboardResponse = await fetch('/api/daily-challenge/leaderboard');
+      const leaderboardData = await leaderboardResponse.json();
+      
+      // Get today's questions
+      const response = await fetch('/api/daily-challenge');
       if (!response.ok) {
-        setLeaderboardError(data.error ?? "Could not load daily challenge.");
+        setLeaderboardError("Could not load daily challenge.");
         return;
       }
-      setDailyState(data);
-      setDailyHasAttempted(Boolean(data.hasAttemptedToday));
+      const data = await response.json();
+      
+      // Check if player has already attempted
+      const hasAttempted = player.lastDailyChallengeDate === getTodayUtcDate();
+      
+      setDailyState({
+        today: getTodayUtcDate(),
+        completedCount: leaderboardData.totalAttempts || 0,
+        top3: leaderboardData.top3 || [],
+        questions: data.questions
+      });
+      setDailyHasAttempted(hasAttempted);
       setDailyQuestionIndex(0);
       setDailyScore(0);
       setDailyCorrect(0);
       setDailyStartTimeMs(Date.now());
       setDailySubmitted(false);
       setScreen("daily");
-    } catch {
+    } catch (error) {
+      console.error('Daily challenge error:', error);
       setLeaderboardError("Could not load daily challenge.");
     }
   };
@@ -763,26 +798,25 @@ export default function Home() {
     }
     const totalTimeMs = Math.max(0, Date.now() - dailyStartTimeMs);
     try {
-      const response = await fetch("/api/game", {
+      const response = await fetch("/api/daily-challenge", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          action: "daily-submit",
-          playerId: player.playerId,
+          player_id: player.playerId,
           score: dailyScore,
-          correctAnswers: dailyCorrect,
-          totalTimeMs,
+          total_time_ms: totalTimeMs,
         }),
       });
       if (!response.ok) {
-        const data = (await response.json()) as { error?: string };
+        const data = await response.json();
         setLeaderboardError(data.error ?? "Could not submit daily challenge.");
         setScreen("menu");
         return;
       }
       setPlayer((prev) => ({ ...prev, lastDailyChallengeDate: dailyState.today }));
       setDailyHasAttempted(true);
-    } catch {
+    } catch (error) {
+      console.error('Submit daily challenge error:', error);
       setLeaderboardError("Could not submit daily challenge.");
     } finally {
       setScreen("menu");
@@ -900,9 +934,6 @@ export default function Home() {
     setMultiAnsweredThisQuestion(false);
     multiAnsweredRef.current = 0;
     multiCorrectRef.current = 0;
-    multiStartTimeRef.current = Date.now();
-    multiTimeRef.current = 0;
-    joinRealtimeMatch(data.match.id);
   };
 
   const respondToInvite = async (accepted: boolean) => {
@@ -961,40 +992,67 @@ export default function Home() {
 
   const startRandomMatch = async () => {
     setIsMatchmaking(true);
-    const response = await fetch("/api/game", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "matchmake", mode: "random", playerId: player.playerId }),
-    });
-    const data = (await response.json()) as { match?: MatchState; waiting?: boolean; error?: string };
-    if (data.waiting) {
-      setLeaderboardError("Waiting for opponent...");
-      if (randomPollingRef.current === null) {
-        randomPollingRef.current = window.setInterval(() => {
-          void startRandomMatch();
-        }, 2500);
+    try {
+      const response = await fetch("/api/multiplayer", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          player_id: player.playerId, 
+          player_name: player.playerName 
+        }),
+      });
+      const data = await response.json();
+      
+      if (data.waiting) {
+        setLeaderboardError("Waiting for opponent...");
+        // Set up Supabase Realtime subscription for waiting room
+        if (supabaseRef.current) {
+          const waitingChannel = supabaseRef.current.channel('waiting-room');
+          waitingChannel.on('postgres_changes', { 
+            event: '*', 
+            schema: 'public', 
+            table: 'matches',
+            filter: `player1_id=eq.${player.playerId},player2_id=eq.${player.playerId}`
+          }, (payload: any) => {
+            if (payload.new && payload.new.status === 'active') {
+              setMatchState(payload.new);
+              setScreen("multiplayer");
+              setQuestionIndex(0);
+              setMultiAnsweredThisQuestion(false);
+              multiAnsweredRef.current = 0;
+              multiCorrectRef.current = 0;
+              multiStartTimeRef.current = Date.now();
+              multiTimeRef.current = 0;
+              setIsMatchmaking(false);
+              joinRealtimeMatch(payload.new.id);
+            }
+          });
+          waitingChannel.subscribe();
+        }
+        return;
       }
-      return;
-    }
-    if (!response.ok || !data.match) {
-      setLeaderboardError(data.error ?? "Could not start random match.");
+      
+      if (!response.ok || !data.match) {
+        setLeaderboardError(data.error ?? "Could not start random match.");
+        setIsMatchmaking(false);
+        return;
+      }
+      
+      setMatchState(data.match);
+      setScreen("multiplayer");
+      setQuestionIndex(0);
+      setMultiAnsweredThisQuestion(false);
+      multiAnsweredRef.current = 0;
+      multiCorrectRef.current = 0;
+      multiStartTimeRef.current = Date.now();
+      multiTimeRef.current = 0;
       setIsMatchmaking(false);
-      return;
+      joinRealtimeMatch(data.match.id);
+    } catch (error) {
+      console.error('Random match error:', error);
+      setLeaderboardError("Could not start random match.");
+      setIsMatchmaking(false);
     }
-    setMatchState(data.match);
-    setScreen("multiplayer");
-    setQuestionIndex(0);
-    setMultiAnsweredThisQuestion(false);
-    multiAnsweredRef.current = 0;
-    multiCorrectRef.current = 0;
-    multiStartTimeRef.current = Date.now();
-    multiTimeRef.current = 0;
-    setIsMatchmaking(false);
-    if (randomPollingRef.current !== null) {
-      window.clearInterval(randomPollingRef.current);
-      randomPollingRef.current = null;
-    }
-    joinRealtimeMatch(data.match.id);
   };
 
   const answerMultiplayer = async (index: number) => {
@@ -1016,7 +1074,21 @@ export default function Home() {
       void playEffect("bad");
     }
     multiTimeRef.current = Math.max(0, Date.now() - multiStartTimeRef.current);
-    await reportMatchProgress(false);
+    
+    // Update score in Supabase
+    try {
+      await fetch(`/api/multiplayer/${matchState.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          player_id: player.playerId,
+          score: multiCorrectRef.current
+        }),
+      });
+    } catch (error) {
+      console.error('Error updating multiplayer score:', error);
+    }
+    
     if (questionIndex + 1 < 10) {
       window.setTimeout(() => {
         setQuestionIndex((prev) => prev + 1);
@@ -1024,7 +1096,21 @@ export default function Home() {
       }, 1200);
       return;
     }
-    await reportMatchProgress(true);
+    
+    // Finish match
+    try {
+      await fetch(`/api/multiplayer/${matchState.id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          player_id: player.playerId,
+          status: 'finished'
+        }),
+      });
+    } catch (error) {
+      console.error('Error finishing match:', error);
+    }
+    
     setLeaderboardError(`Match finished! You got ${multiCorrectRef.current}/10 correct.`);
     setScreen("menu");
     setMatchState(null);
@@ -1081,18 +1167,29 @@ export default function Home() {
       <div className="mx-auto flex min-h-screen w-full max-w-lg flex-col gap-4 px-4 py-6">
         <header className="card bg-white dark:bg-white/5">
           <div className="mb-3 flex items-center justify-between">
-            <h1 className="text-2xl font-bold">Daily Trivia</h1>
-            <button onClick={toggleTheme} className="rounded-xl border border-slate-300 px-3 py-1 text-sm dark:border-white/20">
-              {theme === "dark" ? "Light mode" : "Dark mode"}
-            </button>
+            <h1 className="text-2xl font-bold">{t.dailyChallenge ? 'Daily Trivia' : 'Daily Trivia'}</h1>
+            <div className="flex gap-2">
+              <select 
+                value={language} 
+                onChange={(e) => handleLanguageChange(e.target.value as Language)}
+                className="rounded-xl border border-slate-300 px-3 py-1 text-sm dark:border-white/20 dark:bg-black/20"
+              >
+                {Object.entries(languageNames).map(([code, name]) => (
+                  <option key={code} value={code}>{name}</option>
+                ))}
+              </select>
+              <button onClick={toggleTheme} className="rounded-xl border border-slate-300 px-3 py-1 text-sm dark:border-white/20">
+                {theme === "dark" ? "Light mode" : "Dark mode"}
+              </button>
+            </div>
           </div>
           <p className="text-sm text-slate-600 dark:text-slate-300">10 categories, 10 levels per category, 10 questions per level.</p>
           <div className="mt-3 flex gap-2">
             <button onClick={() => setShowLeaderboard((value) => !value)} className="rounded-xl border border-slate-300 px-3 py-1 text-sm dark:border-white/20">
-              {showLeaderboard ? "Hide leaderboard" : "Global leaderboard"}
+              {showLeaderboard ? t.leaderboard : t.leaderboard}
             </button>
             <button onClick={() => setScreen("profile")} className="rounded-xl border border-slate-300 px-3 py-1 text-sm dark:border-white/20">
-              Profile
+              {t.profile}
             </button>
           </div>
         </header>
@@ -1116,7 +1213,7 @@ export default function Home() {
 
         {screen === "entry" ? (
           <section className="card bg-white dark:bg-white/5">
-            <h2 className="mb-2 text-xl font-semibold">Enter your name to start</h2>
+            <h2 className="mb-2 text-xl font-semibold">{t.enterYourName}</h2>
             <p className="mb-3 text-sm text-slate-600 dark:text-slate-300">Your name will appear on the leaderboard and in WhatsApp share.</p>
             <input
               value={playerNameInput}
@@ -1128,12 +1225,12 @@ export default function Home() {
                 }
               }}
               maxLength={24}
-              placeholder="Name or nickname"
+              placeholder={t.enterYourName}
               className="mb-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-slate-900 outline-none ring-indigo-300 focus:ring-2 dark:border-white/20 dark:bg-black/20 dark:text-white"
             />
             {nameError && <p className="mb-2 text-sm font-semibold text-rose-500">{nameError}</p>}
             <button onClick={savePlayerName} className="w-full rounded-xl bg-indigo-600 px-4 py-3 font-semibold text-white">
-              Continue
+              {t.startPlaying}
             </button>
           </section>
         ) : null}
@@ -1172,32 +1269,40 @@ export default function Home() {
               </div>
             ) : null}
             <div className="mb-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm dark:border-amber-600/40 dark:bg-amber-500/10">
-              <div className="font-semibold">Daily Challenge</div>
+              <div className="font-semibold">{t.dailyChallenge}</div>
               <div>New 10 questions every day at 00:00 UTC for all players.</div>
-              <div className="mt-1 text-xs">Next reset in: {formatMsAsClock(nextDailyCountdownMs)} (UTC)</div>
+              <div className="mt-1 text-xs">{t.timeUntilNext}: {formatMsAsClock(nextDailyCountdownMs)} (UTC)</div>
               <button
                 onClick={() => void loadDailyChallenge()}
                 disabled={dailyHasAttempted || player.lastDailyChallengeDate === getTodayUtcDate()}
                 className="mt-2 rounded-lg bg-amber-500 px-3 py-1 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {dailyHasAttempted || player.lastDailyChallengeDate === getTodayUtcDate() ? "Already played today" : "Play Daily Challenge"}
+                {dailyHasAttempted || player.lastDailyChallengeDate === getTodayUtcDate() ? t.completedToday : t.dailyChallenge}
               </button>
             </div>
             <div className="mb-3 rounded-xl border border-indigo-300 bg-indigo-50 p-3 text-sm dark:border-indigo-700/50 dark:bg-indigo-500/10">
-              <div className="mb-2 font-semibold">1v1 Multiplayer</div>
+              <div className="mb-2 font-semibold">{t.multiplayer}</div>
               <div className="mb-2 flex gap-2">
                 <input
                   value={friendIdInput}
                   onChange={(event) => setFriendIdInput(event.target.value.toUpperCase())}
-                  placeholder="Friend ID (TRV-4X9K)"
+                  placeholder={t.enterFriendId}
                   className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 dark:border-white/20 dark:bg-black/20"
                 />
-                <button onClick={() => void startFriendMatch()} className="rounded-lg bg-indigo-600 px-3 py-2 text-white">
-                  {isMatchmaking ? "Waiting..." : "Challenge"}
+                <button
+                  onClick={() => void startFriendMatch()}
+                  disabled={isMatchmaking}
+                  className="rounded-lg bg-indigo-500 px-3 py-2 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isMatchmaking ? "Challenging..." : t.challenge}
                 </button>
               </div>
-              <button onClick={() => void startRandomMatch()} disabled={isMatchmaking} className="rounded-lg border border-indigo-500 px-3 py-2 font-semibold text-indigo-700 dark:text-indigo-300">
-                {isMatchmaking ? "Matching..." : "Random Match"}
+              <button
+                onClick={() => void startRandomMatch()}
+                disabled={isMatchmaking}
+                className="w-full rounded-lg bg-purple-500 px-3 py-2 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {isMatchmaking ? t.waitingForPlayer : t.randomMatch}
               </button>
             </div>
             <AdUnit slot="1000000001" label="AdSense ad (main menu) - replace publisher ID in layout.tsx and this component." />
@@ -1402,9 +1507,9 @@ export default function Home() {
 
         {screen === "daily" ? (
           <section className="card bg-white dark:bg-white/5">
-            <h2 className="mb-2 text-xl font-semibold">Daily Challenge</h2>
+            <h2 className="mb-2 text-xl font-semibold">{t.dailyChallengeTitle}</h2>
             <p className="mb-2 text-sm text-slate-600 dark:text-slate-300">
-              Completed today: {dailyState?.completedCount ?? 0}
+              {t.attemptsToday}: {dailyState?.completedCount ?? 0}
             </p>
             <div className="mb-3 rounded-xl bg-slate-50 p-3 text-xs dark:bg-black/20">
               Top 3 today:
@@ -1437,12 +1542,12 @@ export default function Home() {
                 <div className="mb-2">Score: {dailyScore}</div>
                 <div className="mb-3">Correct: {dailyCorrect}/10</div>
                 <button onClick={() => void finishDailyChallenge()} className="w-full rounded-xl bg-indigo-600 px-4 py-3 font-semibold text-white">
-                  Finish Daily Challenge
+                  {t.finish}
                 </button>
               </>
             )}
             <button onClick={() => setScreen("menu")} className="mt-3 w-full rounded-xl border border-slate-300 px-4 py-2 font-semibold dark:border-white/20">
-              Back to menu
+              {t.back}
             </button>
           </section>
         ) : null}
