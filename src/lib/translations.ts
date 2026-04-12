@@ -156,6 +156,9 @@ export interface Translation {
   // Streak messages
   streakBonus: string
   bonusCoins: string
+  
+  // Index signature for dynamic access (e.g., category IDs)
+  [key: string]: string
 }
 
 export const translations: Record<Language, Translation> = {
